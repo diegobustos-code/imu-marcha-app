@@ -60,6 +60,7 @@ class MainActivity : Activity() {
     private lateinit var txtEmisor: TextView
     private lateinit var btnEmisor: Button
     private lateinit var btnRespaldo: Button
+    private lateinit var btnRemoto: Button
     private lateinit var rbSimulada: RadioButton
     private lateinit var edFrec: EditText
     private lateinit var edDestino: EditText
@@ -125,20 +126,19 @@ class MainActivity : Activity() {
         mostrar(0)
         ui.postDelayed({ medirCompatibilidad() }, 600)
         ui.post(refresco)
-        if (Global.control == null) Global.control = Control({ Global.emisor }, carpetaRespaldo).also { it.start() }
+        Global.asegurarControl(this)
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        if (emisor != null) {                      // la ventana se volvió a abrir con el emisor activo
-            btnEmisor.text = "Detener emisor"; btnRespaldo.isEnabled = true; mostrar(1)
-        }
+        actualizarRemoto()
+        if (emisor != null || Global.remoto) mostrar(1)   // la ventana se volvió a abrir con el emisor activo
     }
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
         // el emisor y el control siguen en el servicio aunque se cierre la ventana
-        if (isFinishing && emisor == null) { Global.control?.detener(); Global.control = null }
+        if (isFinishing && emisor == null && !Global.remoto) { Global.control?.detener(); Global.control = null }
         detenerReceptor()
         super.onDestroy()
     }
@@ -283,6 +283,18 @@ class MainActivity : Activity() {
 
     private fun crearEmisor(): View {
         val (sc, ll) = pagina()
+        btnRemoto = Button(this).apply {
+            isAllCaps = false; textSize = 16f; setPadding(px(12), px(14), px(12), px(14))
+            setOnClickListener {
+                Global.activarRemoto(this@MainActivity, !Global.remoto)
+                actualizarRemoto()
+            }
+        }
+        ll.addView(btnRemoto)
+        ll.addView(parrafo("Modo remoto: deja el celular en el cinturón con este modo activo. La app de Windows lo "
+            "detecta, lo enciende y lo apaga sola, e inicia y detiene el registro sin tocar el teléfono. Funciona con la "
+            "pantalla apagada. El celular y el PC deben estar en la misma red WiFi (por ejemplo, IMU-Marcha).", 12f))
+        ll.addView(parrafo("Uso manual (pruebas):", 13f))
         ll.addView(parrafo("Hace de Stick: envía la aceleración y el giro del teléfono (o una marcha simulada) " +
             "a 100 Hz, con el mismo formato de paquete que el firmware. Así se prueban el receptor y el registro " +
             "antes de que llegue el equipo."))
@@ -325,24 +337,24 @@ class MainActivity : Activity() {
     private fun alternarEmisor() {
         val e = emisor
         if (e != null) {
-            e.detener(); emisor = null
-            stopService(Intent(this, ServicioEmisor::class.java))
-            btnEmisor.text = "Iniciar emisor"
-            btnRespaldo.isEnabled = false
+            Global.detenerEmisor(this)
             txtEmisor.text = "Detenido. Paquetes enviados: ${e.enviados}"
         } else {
             if (midiendo) { txtEmisor.text = "Espera que termine la prueba de compatibilidad."; return }
             val f = edFrec.text.toString().replace(',', '.').toDoubleOrNull() ?: 1.9
-            val dest = edDestino.text.toString().trim()
-            val red = if (dest.startsWith("127.")) null else redWifi()
-            val nuevo = Emisor(sm, dest, rbSimulada.isChecked, f, carpetaRespaldo, red)
-            emisor = nuevo; inicioEmisor = System.currentTimeMillis()
-            nuevo.start()
-            startForegroundService(Intent(this, ServicioEmisor::class.java))
-            btnEmisor.text = "Detener emisor"
-            btnRespaldo.isEnabled = true
+            Global.iniciarEmisor(this, edDestino.text.toString().trim(), rbSimulada.isChecked, f)
+            inicioEmisor = System.currentTimeMillis()
         }
+        actualizarRemoto()
         mantenerPantalla()
+    }
+
+    private fun actualizarRemoto() {
+        btnRemoto.text = if (Global.remoto) "●  Modo remoto ACTIVO (toca para desactivar)" else "Activar modo remoto (el PC controla este celular)"
+        btnRemoto.setBackgroundColor(if (Global.remoto) Color.rgb(26, 159, 69) else Color.rgb(31, 95, 168))
+        btnRemoto.setTextColor(Color.WHITE)
+        btnEmisor.text = if (emisor != null) "Detener emisor" else "Iniciar emisor"
+        btnRespaldo.isEnabled = emisor != null
     }
 
     // ------------------------------------------------------------------ 3. Receptor
@@ -477,6 +489,12 @@ class MainActivity : Activity() {
 
     private val refresco = object : Runnable {
         override fun run() {
+            actualizarRemoto()
+            if (emisor == null && Global.remoto) {
+                val ip = datosWifi()?.second ?: "sin WiFi"
+                txtEmisor.text = "Modo remoto: esperando que el PC encienda el envío.\nCelular en la red: $ip\n" +
+                    "Control: http://$ip:${Control.PUERTO}"
+            }
             emisor?.let { e ->
                 val s = (System.currentTimeMillis() - e.creado) / 1000.0
                 val tasa = if (s > 0) e.enviados * Paquete.POR_PAQUETE / s else 0.0

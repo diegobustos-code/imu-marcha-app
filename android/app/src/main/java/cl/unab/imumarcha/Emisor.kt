@@ -24,7 +24,7 @@ import kotlin.math.sin
  */
 class Emisor(
     private val sm: SensorManager,
-    private val destino: String,
+    val destino: String,
     private val simulada: Boolean,
     private val frecSim: Double,
     private val carpetaRespaldo: File,

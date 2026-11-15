@@ -13,8 +13,11 @@ import java.net.URLDecoder
  * Servidor HTTP mínimo (puerto 8080) con las mismas rutas que el firmware del Stick, para que la
  * app de Windows controle el celular igual que a cualquier IMU:
  *   /estado  /inicio?sesion=X  /fin  /archivos  /archivo?n=X.bin  /borrar?n=X.bin
+ * y dos propias del celular, para encenderlo y apagarlo desde el PC sin tocar el teléfono:
+ *   /emisor/iniciar[?modo=sensores|simulada&frec=1.9&destino=IP]   (por defecto envía al PC que lo pide)
+ *   /emisor/detener
  */
-class Control(private val obtenerEmisor: () -> Emisor?, private val carpeta: File) : Thread("control") {
+class Control(private val ctx: android.content.Context, private val carpeta: File) : Thread("control") {
     @Volatile var activo = true
     @Volatile var error: String? = null
     private var servidor: ServerSocket? = null
@@ -53,9 +56,19 @@ class Control(private val obtenerEmisor: () -> Emisor?, private val carpeta: Fil
                 k to URLDecoder.decode(v, "UTF-8")
             }
             val out = sock.getOutputStream()
-            val e = obtenerEmisor()
+            var e = Global.emisor
             when (camino) {
                 "/estado" -> json(out, 200, estado(e))
+                "/emisor/iniciar" -> {
+                    val destino = args["destino"] ?: sock.inetAddress.hostAddress ?: "255.255.255.255"
+                    e = Global.iniciarEmisor(ctx, destino, args["modo"] == "simulada",
+                        args["frec"]?.toDoubleOrNull() ?: 1.9)
+                    json(out, 200, estado(e))
+                }
+                "/emisor/detener" -> {
+                    if (e?.grabando == true) json(out, 409, "{\"error\":\"está grabando; primero /fin\"}")
+                    else { Global.detenerEmisor(ctx); json(out, 200, estado(null)) }
+                }
                 "/inicio" -> {
                     if (e == null) json(out, 409, "{\"error\":\"el emisor no está activo\"}")
                     else { e.iniciarGrabacion(args["sesion"] ?: ""); json(out, 200, estado(e)) }
@@ -97,7 +110,7 @@ class Control(private val obtenerEmisor: () -> Emisor?, private val carpeta: Fil
         val libre = carpeta.apply { mkdirs() }.usableSpace / 1024
         val seg = if (e != null && e.grabando) (System.currentTimeMillis() - e.inicioGrabacion) / 1000.0 else 0.0
         return "{\"equipo\":\"Celular ${Build.MANUFACTURER} ${Build.MODEL}\",\"version\":\"1.0\"," +
-            "\"emitiendo\":${e != null},\"grabando\":${e?.grabando ?: false},\"sesion\":\"${e?.sesion ?: ""}\"," +
+            "\"emitiendo\":${e != null},\"remoto\":${Global.remoto},\"grabando\":${e?.grabando ?: false},\"sesion\":\"${e?.sesion ?: ""}\"," +
             "\"segundos\":${"%.1f".format(java.util.Locale.US, seg)},\"bytes\":${e?.bytesGrabados ?: 0}," +
             "\"secuencia\":${e?.secuencia ?: 0},\"descartados\":0,\"bateria\":-1,\"libre_kb\":$libre,\"fs_hz\":100}"
     }
