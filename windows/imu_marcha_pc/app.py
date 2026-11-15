@@ -316,7 +316,7 @@ class PestanaRegistro(QtWidgets.QWidget):
             for m in self.registro.mensajes:
                 self.escribir(m)
             self.escribir(f"Registro iniciado: {self.registro.sesion} con {', '.join(e.nombre for e in eqs)}. "
-                          "Recuerda los tres saltos al inicio.")
+                          "Recuerda la marca de sincronización (un salto, o 5 s de pie quieto en adultos mayores).")
             self.btn.setText("■  Detener registro")
             self.btn.setStyleSheet("background:#C0392B;color:white;")
         else:
@@ -751,7 +751,9 @@ Si usas el celular como IMU, conéctalo a la misma red, abre la app Android, pes
 <li><b>Registro.</b> Los equipos aparecen solos en la tabla. Marca los que quieras usar, completa participante,
 condición y repetición, y presiona <i>Iniciar registro</i>. El equipo en la zona lumbar empieza a guardar su
 respaldo (en el Stick la pantalla se pone roja y dice GRABANDO).</li>
-<li><b>Saltos de sincronización.</b> Con la cámara grabando, la persona da <b>tres saltos pequeños</b> y después camina.</li>
+<li><b>Marca de sincronización.</b> Con la cámara grabando: en voluntarios jóvenes, <b>un salto con ambos pies</b> antes de
+cada pasada (el software lo detecta solo). En adultos mayores <b>no se salta</b>: 5 s de pie quietos y luego caminar; el desfase se
+ajusta a mano en <i>Procesar</i> alineando el inicio de la marcha (en la caminata de 1 minuto basta con esa marca).</li>
 <li><b>Detener.</b> Al detener, el PC descarga el respaldo del equipo y rellena lo que se perdió por WiFi.
 Se guardan <i>imu_&lt;equipo&gt;.csv</i> (mismas columnas que ver_imu.py), el respaldo .bin, la hora de llegada de cada
 paquete y <i>sesion.json</i>.</li>
