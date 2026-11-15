@@ -102,6 +102,20 @@ class MainActivity : Activity() {
         val cont = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         vistas.forEach { cont.addView(it, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }
         raiz.addView(cont, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        // Android 15+ dibuja bajo la barra de estado: se deja espacio para las barras del sistema
+        raiz.setOnApplyWindowInsetsListener { v, ins ->
+            if (Build.VERSION.SDK_INT >= 30) {
+                val b = ins.getInsets(android.view.WindowInsets.Type.systemBars())
+                v.setPadding(b.left, b.top, b.right, b.bottom)
+            } else {
+                @Suppress("DEPRECATION")
+                v.setPadding(ins.systemWindowInsetLeft, ins.systemWindowInsetTop, ins.systemWindowInsetRight, ins.systemWindowInsetBottom)
+            }
+            ins
+        }
+        raiz.setBackgroundColor(Color.rgb(31, 95, 168))
+        cont.setBackgroundColor(Color.WHITE)
+        barra.setBackgroundColor(Color.WHITE)
         setContentView(raiz)
         mostrar(0)
         ui.postDelayed({ medirCompatibilidad() }, 600)
