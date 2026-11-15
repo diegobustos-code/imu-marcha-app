@@ -3,6 +3,13 @@
 Herramientas para la Etapa 2 del Proyecto 1 (Análisis de marcha y riesgo de caída, UNAB): comparar la
 frecuencia dominante de la marcha medida con cámara contra una IMU lumbar.
 
+El proyecto principal (Etapa 1, informes, notebooks y plan de la Etapa 2) está en
+[proyecto-marcha-practicaI](https://github.com/diegobustos-code/proyecto-marcha-practicaI). Este repositorio
+contiene solo el software de captura y procesamiento; no contiene datos de personas.
+
+**Descargas listas para usar:** [última versión](https://github.com/diegobustos-code/imu-marcha-app/releases/latest)
+(app de Windows, APK de Android y firmware).
+
 | Carpeta | Qué es |
 |---|---|
 | `firmware/imu_marcha` | Firmware único para **M5StickS3**, **M5StickC Plus2** o **ESP32 + MPU-6050**: muestreo a 100 Hz, envío UDP (puerto 5005, paquetes de 164 bytes como `imu_esp32_udp.ino`), control HTTP (puerto 8080) y respaldo en la memoria interna. |
