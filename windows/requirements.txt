@@ -1,0 +1,9 @@
+numpy
+scipy
+pandas
+PySide6
+pyqtgraph
+opencv-python
+mediapipe
+pytest
+pyinstaller

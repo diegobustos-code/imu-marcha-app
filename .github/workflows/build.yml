@@ -57,19 +57,63 @@ jobs:
             firmware/imu_marcha/imu_marcha.ino > /tmp/mpu/imu_marcha/imu_marcha.ino
           arduino-cli compile --fqbn esp32:esp32:esp32 /tmp/mpu/imu_marcha
 
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements.txt
+      - name: Pruebas
+        run: python -m pytest pruebas -q
+      - name: Modelo de MediaPipe
+        shell: pwsh
+        run: Invoke-WebRequest -Uri "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task" -OutFile pose_landmarker_full.task
+      - name: Empaquetar
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name IMU_Marcha
+          --collect-all mediapipe --add-data "pose_landmarker_full.task;."
+          --exclude-module tkinter lanzar.py
+      - name: Probar el ejecutable
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\IMU_Marcha\IMU_Marcha.exe -ArgumentList "--autoprueba" -PassThru -Wait
+          Get-Content dist\IMU_Marcha\autoprueba.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+          Remove-Item dist\IMU_Marcha\autoprueba.txt
+      - name: Comprimir
+        shell: pwsh
+        run: Compress-Archive -Path dist\IMU_Marcha -DestinationPath ..\IMU_Marcha_Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: IMU_Marcha_Windows.zip
+
   publicar:
-    needs: [android, firmware]
+    needs: [android, firmware, windows]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: art
           merge-multiple: true
+      - name: Agregar el firmware
+        run: cp firmware/imu_marcha/imu_marcha.ino art/
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: IMU Marcha (versión ${{ github.run_number }})
-          body: Compilado automáticamente desde ${{ github.sha }}.
+          body: |
+            Compilado automáticamente desde ${{ github.sha }}.
+            - IMU_Marcha_Windows.zip: app de Windows (descomprimir y abrir IMU_Marcha.exe).
+            - IMU_Marcha.apk: app Android (compatibilidad, emisor y receptor).
+            - imu_marcha.ino: firmware para M5StickS3, M5StickC Plus2 o ESP32 + MPU-6050.
           files: art/*
           make_latest: true
