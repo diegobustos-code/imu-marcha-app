@@ -94,3 +94,36 @@ def test_concordancia():
     r = A.evaluar_criterios(tabla)
     assert r["cumple_sesgo"] and r["cumple_loa"] and r["cumple_icc_global"] and r["icc_global"] > 0.95
     assert abs(A.icc_a1(imu, imu) - 1.0) < 1e-9
+
+
+def test_reloj_desfase_y_deriva():
+    from imu_marcha_pc import reloj as R
+    rng = np.random.default_rng(3)
+    t_dev = np.arange(0, 60, 0.1)
+    retardo = 0.002 + rng.exponential(0.008, len(t_dev))      # red con retardo variable
+    t_pc = 1_700_000_000.0 + t_dev * (1 + 40e-6) + retardo
+    r = R.ajustar(t_dev, t_pc)
+    assert abs(r["desfase_s"] - (1_700_000_000.0 + 0.002)) < 0.003
+    assert abs(r["deriva_ppm"] - 40) < 15
+    assert r["incertidumbre_ms"] < 5
+    assert R.ajustar(t_dev[:30], t_pc[:30]) is None             # menos de 8 s: aún sincronizando
+
+
+def test_sesion_guarda_reloj(tmp_path):
+    sim = SimuladorEquipo(frecuencia=1.9, perdida=0.0, carpeta=tmp_path / "eq").iniciar()
+    rx = Receptor(); rx.start()
+    try:
+        for _ in range(40):
+            time.sleep(0.1)
+            if rx.lista() and rx.lista()[0].control is not None:
+                break
+        eq = rx.lista()[0]
+        time.sleep(11)
+        listo, motivos = eq.listo()
+        assert listo, motivos
+        reg = Registro([eq], tmp_path / "d", "P02", "lenta", 1)
+        reg.iniciar(); time.sleep(10); meta = reg.detener()
+    finally:
+        rx.activo = False; sim.detener()
+    rel = meta["equipos"][0]["reloj"]
+    assert rel is not None and rel["incertidumbre_ms"] < 15 and abs(rel["inicio_pc"] - time.time()) < 60

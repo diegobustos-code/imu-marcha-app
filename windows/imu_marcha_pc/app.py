@@ -14,6 +14,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from . import __version__
 from . import analisis as A
 from . import protocolo as P
+from . import reloj as R
 from .registro import Receptor, Registro, carpeta_sesion, nombre_sesion, pedir
 
 CARPETA_POR_DEFECTO = r"F:\Practica_I\Etapa2_datos"
@@ -74,8 +75,9 @@ class PestanaRegistro(QtWidgets.QWidget):
         izq = QtWidgets.QVBoxLayout()
         caja = QtWidgets.QGroupBox("Equipos que están enviando datos (puerto 5005)")
         v = QtWidgets.QVBoxLayout(caja)
-        self.tabla = QtWidgets.QTableWidget(0, 6)
-        self.tabla.setHorizontalHeaderLabels(["Usar", "Equipo", "IP", "Paquetes / perdidos", "Batería", "Estado"])
+        self.tabla = QtWidgets.QTableWidget(0, 8)
+        self.tabla.setHorizontalHeaderLabels(["Usar", "Equipo", "IP", "Paquetes / perdidos", "Batería",
+                                              "Sincronía", "Listo", "Estado"])
         self.tabla.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.tabla.horizontalHeader().setStretchLastSection(True)
         self.tabla.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -87,6 +89,9 @@ class PestanaRegistro(QtWidgets.QWidget):
         fila.addWidget(self.btn_sim)
         fila.addStretch()
         v.addLayout(fila)
+        self.lbl_sinc = QtWidgets.QLabel("Esperando equipos…")
+        self.lbl_sinc.setWordWrap(True)
+        v.addWidget(self.lbl_sinc)
         izq.addWidget(caja)
 
         datos = QtWidgets.QGroupBox("Sesión")
@@ -167,9 +172,9 @@ class PestanaRegistro(QtWidgets.QWidget):
             self.escribir("Simulador detenido.")
         else:
             try:
-                self.simulador = SimuladorEquipo(frecuencia=1.9, perdida=0.03).iniciar()
+                self.simulador = SimuladorEquipo(frecuencia=1.9, perdida=0.005).iniciar()
                 self.btn_sim.setText("Detener simulador")
-                self.escribir("Simulador iniciado: marcha de 1,90 Hz con tres saltos al inicio y 3 % de pérdidas.")
+                self.escribir("Simulador iniciado: marcha de 1,90 Hz con tres saltos al inicio y 0,5 % de pérdidas.")
             except OSError as e:
                 self.escribir(f"No se pudo iniciar el simulador: {e}")
 
@@ -197,14 +202,46 @@ class PestanaRegistro(QtWidgets.QWidget):
                 est = "sin datos"
             else:
                 est = "control remoto OK" if eq.control else ("sin control (solo recepción)" if eq.control is False else "…")
+            sinc = eq.sincronia() if eq.activo() else None
+            txt_sinc, nivel = R.estado_texto(sinc) if eq.activo() else ("—", "pendiente")
+            listo, motivos = eq.listo()
+            hz, perd = eq.ritmo()
             vals = [eq.nombre, eq.ip, f"{eq.recibidos} / {eq.perdidos} ({pct:.1f} %)",
-                    f"{bat} %" if bat is not None and bat >= 0 else "—", est]
+                    f"{bat} %" if bat is not None and bat >= 0 else "—", txt_sinc,
+                    "✔ listo" if listo else "✘ " + motivos[0], est]
+            colores = {5: {"bueno": "#1a7f37", "aceptable": "#B8860B", "malo": "#B00", "pendiente": "#777"}[nivel],
+                       6: "#1a7f37" if listo else "#B00", 7: "#B00" if eq.grabando else "#222"}
             for j, txt in enumerate(vals, start=1):
                 it = self.tabla.item(i, j)
                 if it is None:
                     it = QtWidgets.QTableWidgetItem(); self.tabla.setItem(i, j, it)
                 it.setText(str(txt))
-                it.setForeground(QtGui.QColor("#B00" if eq.grabando and j == 5 else "#222"))
+                it.setForeground(QtGui.QColor(colores.get(j, "#222")))
+            self.tabla.item(i, 6).setToolTip("\n".join(motivos) if motivos else
+                                             f"{hz:.0f} muestras/s, {perd:.1f} % perdidos, control remoto OK")
+            if sinc:
+                self.tabla.item(i, 5).setToolTip(
+                    f"Desfase con el reloj del PC estimado en {sinc['ventanas']} ventanas de 2 s\n"
+                    f"Deriva del reloj del equipo: {sinc['deriva_ppm']:+.0f} ppm")
+        # sincronía entre equipos
+        sincronizados = [(eq, eq.sincronia()) for eq in lista if eq.activo() and self.usar.get(eq.ip, True)]
+        ok = [(eq, r) for eq, r in sincronizados if r is not None]
+        if not sincronizados:
+            self.lbl_sinc.setText("Esperando equipos…")
+        elif len(ok) < len(sincronizados):
+            self.lbl_sinc.setText(f"Sincronizando relojes: {len(ok)} de {len(sincronizados)} equipos listos "
+                                  "(se necesitan unos 10 s de datos).")
+            self.lbl_sinc.setStyleSheet("color:#777;")
+        elif len(ok) == 1:
+            self.lbl_sinc.setText(f"Reloj sincronizado con el PC (±{ok[0][1]['incertidumbre_ms']:.0f} ms).")
+            self.lbl_sinc.setStyleSheet("color:#1a7f37;")
+        else:
+            entre = sorted(r["incertidumbre_ms"] for _, r in ok)[-2:]
+            total = sum(entre)
+            color = "#1a7f37" if total <= 2 * R.UMBRAL_BUENO_MS else ("#B8860B" if total <= 2 * R.UMBRAL_ACEPTABLE_MS else "#B00")
+            self.lbl_sinc.setText(f"✔ {len(ok)} equipos sincronizados entre sí con el reloj del PC "
+                                  f"(diferencia máxima estimada ±{total:.0f} ms).")
+            self.lbl_sinc.setStyleSheet(f"color:{color};")
         # estado de batería cada ~5 s
         for eq in lista:
             if eq.control and time.time() - getattr(eq, "_ult_estado", 0) > 5:
@@ -247,6 +284,17 @@ class PestanaRegistro(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(self, "Sin equipos", "No hay equipos enviando datos. Revisa que el PC "
                                               "esté conectado a la red IMU-Marcha (o inicia el simulador).")
                 return
+            problemas = []
+            for eq in eqs:
+                listo, motivos = eq.listo()
+                if not listo:
+                    problemas.append(f"• {eq.nombre}: " + "; ".join(motivos))
+            if problemas:
+                r = QtWidgets.QMessageBox.question(
+                    self, "Hay equipos que no están listos",
+                    "\n".join(problemas) + "\n\n¿Iniciar el registro de todos modos?")
+                if r != QtWidgets.QMessageBox.Yes:
+                    return
             s = nombre_sesion(self.ed_part.text(), self.cb_cond.currentText(), self.sp_rep.value())
             destino = carpeta_sesion(self.ed_base.text(), self.ed_part.text(), s)
             if destino.exists() and any(destino.iterdir()):
@@ -297,6 +345,10 @@ class PestanaRegistro(QtWidgets.QWidget):
                 self.escribir(f"{e['equipo']}: {e['muestras']} muestras ({e['duracion_s']} s); perdidos en vivo "
                               f"{e['perdidos_en_vivo']}, recuperados del respaldo {e['recuperados_del_respaldo']}, "
                               f"faltantes {e['faltantes_final']} → {e['archivo']}")
+                if e.get("reloj"):
+                    rl = e["reloj"]
+                    self.escribir(f"   reloj: inicio {rl['inicio_pc_hora']} (±{rl['incertidumbre_ms']:.0f} ms), "
+                                  f"deriva {rl['deriva_ppm']:+.0f} ppm")
             self.escribir(f"Sesión guardada en {carpeta_sesion(self.ed_base.text(), meta['participante'], meta['sesion'])}")
             self.lbl_tiempo.setText(f"Guardado: {meta['sesion']} ({meta['duracion_s']} s)")
             self.sp_rep.setValue(self.sp_rep.value() + 1)

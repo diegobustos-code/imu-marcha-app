@@ -17,6 +17,13 @@ import numpy as np
 import pandas as pd
 
 from . import protocolo as P
+from . import reloj as R
+
+# Condiciones para considerar a un equipo "listo para grabar"
+LISTO_HZ = (95, 105)
+LISTO_PERDIDA_PCT = 1.0
+LISTO_BATERIA_PCT = 20
+LISTO_MEMORIA_KB = 1000          # ~10 minutos de respaldo
 
 
 # ---------------------------------------------------------------- control HTTP
@@ -47,6 +54,9 @@ class Equipo:
         self.buf_t = collections.deque(maxlen=self.VENTANA)
         self.buf_v = collections.deque(maxlen=self.VENTANA)
         self.lock = threading.Lock()
+        self.sinc = R.Sincronizador()
+        self.recientes = collections.deque()   # (t_pc, secuencia) de los últimos 10 s
+        self._sinc_cache = (0.0, None)
         # registro en curso
         self.grabando = False
         self.paquetes = []           # (secuencia, matriz, t_pc)
@@ -58,6 +68,8 @@ class Equipo:
             if self.ultima_sec is not None and sec < self.ultima_sec and self.ultima_sec - sec > 50:
                 self.reinicios += 1
                 self.reloj.reinicio()
+                self.sinc.reiniciar()
+                self.recientes.clear()
             elif self.ultima_sec is not None and sec > self.ultima_sec + 1:
                 self.perdidos += sec - self.ultima_sec - 1
                 if self.grabando:
@@ -69,6 +81,10 @@ class Equipo:
             for k in range(P.POR_PAQUETE):
                 self.buf_t.append(self.reloj.tiempo(int(m[k, 0])))
                 self.buf_v.append(vals[k])
+            self.sinc.agregar(self.buf_t[-1], t_pc)       # última muestra del paquete
+            self.recientes.append((t_pc, sec))
+            while self.recientes and t_pc - self.recientes[0][0] > 10:
+                self.recientes.popleft()
             if self.grabando:
                 self.paquetes.append((sec, m.copy(), t_pc))
                 self.rec_recibidos += 1
@@ -81,6 +97,57 @@ class Equipo:
 
     def activo(self):
         return time.time() - self.ultimo_paquete < 2.0
+
+    def sincronia(self):
+        """Estimación del reloj (se recalcula como máximo una vez por segundo)."""
+        ahora = time.time()
+        if ahora - self._sinc_cache[0] > 1.0:
+            with self.lock:
+                r = self.sinc.estimar()
+            self._sinc_cache = (ahora, r)
+        return self._sinc_cache[1]
+
+    def ritmo(self):
+        """(muestras por segundo, % de paquetes perdidos) en los últimos 10 s."""
+        with self.lock:
+            rec = list(self.recientes)
+        if len(rec) < 2:
+            return 0.0, 0.0
+        dur = rec[-1][0] - rec[0][0]
+        hz = (len(rec) - 1) * P.POR_PAQUETE / dur if dur > 0 else 0.0
+        esperados = rec[-1][1] - rec[0][1] + 1
+        perd = 100.0 * max(esperados - len(rec), 0) / esperados if esperados > 0 else 0.0
+        return hz, perd
+
+    def listo(self):
+        """(listo, lista de motivos) para empezar un registro."""
+        motivos = []
+        if not self.activo():
+            return False, ["no llegan datos"]
+        if self.control is False:
+            motivos.append("sin control remoto: no guardará respaldo")
+        elif self.control is None:
+            motivos.append("identificando el equipo…")
+        hz, perd = self.ritmo()
+        if len(self.recientes) >= 20:
+            if not (LISTO_HZ[0] <= hz <= LISTO_HZ[1]):
+                motivos.append(f"envía {hz:.0f} muestras/s (debe ser 100)")
+            if perd > LISTO_PERDIDA_PCT:
+                motivos.append(f"pierde {perd:.1f} % de los paquetes")
+        else:
+            motivos.append("midiendo el ritmo…")
+        bat = self.estado.get("bateria", -1) if self.estado else -1
+        if bat is not None and 0 <= bat < LISTO_BATERIA_PCT:
+            motivos.append(f"batería baja ({bat} %)")
+        libre = self.estado.get("libre_kb") if self.estado else None
+        if libre is not None and libre < LISTO_MEMORIA_KB:
+            motivos.append(f"poca memoria para el respaldo ({libre} kB ≈ {libre / 98:.0f} min)")
+        _, nivel = R.estado_texto(self.sincronia())
+        if nivel == "pendiente":
+            motivos.append("reloj aún sin sincronizar")
+        elif nivel == "malo":
+            motivos.append("sincronización imprecisa (red con mucho retardo)")
+        return len(motivos) == 0, motivos
 
 
 class Receptor(threading.Thread):
@@ -236,6 +303,18 @@ class Registro:
         df, reinicios = P.paquetes_a_tabla(orden)
         if len(df):
             P.guardar_csv(df, self.carpeta / f"imu_{etiqueta}.csv")
+        reloj = None
+        if vivos and len(df):
+            # tiempo del equipo de la última muestra de cada paquete recibido en vivo
+            ult = df.groupby("secuencia")["t_s"].max()
+            pares = [(ult[s], t) for s, _, t in vivos if s in ult.index]
+            if pares:
+                a = np.array(pares)
+                reloj = R.ajustar(a[:, 0], a[:, 1])
+            if reloj:
+                reloj["inicio_pc"] = reloj["desfase_s"]          # hora del PC (epoch) en t_s = 0
+                reloj["inicio_pc_hora"] = datetime.fromtimestamp(reloj["desfase_s"]).isoformat(timespec="milliseconds")
+                reloj["formula"] = "t_pc = inicio_pc + t_s * (1 + deriva_ppm / 1e6)"
         if vivos:
             pd.DataFrame({"secuencia": [s for s, _, _ in vivos],
                           "t_pc_s": [round(t - vivos[0][2], 4) for _, _, t in vivos],
@@ -251,5 +330,5 @@ class Registro:
             "paquetes_en_vivo": len(vivos), "perdidos_en_vivo": eq.rec_perdidos,
             "recuperados_del_respaldo": recuperados, "faltantes_final": faltantes,
             "muestras": int(len(df)), "duracion_s": round(float(df["t_s"].iloc[-1]), 2) if len(df) else 0.0,
-            "reinicios": reinicios, "con_respaldo": bool(respaldo),
+            "reinicios": reinicios, "con_respaldo": bool(respaldo), "reloj": reloj,
         }

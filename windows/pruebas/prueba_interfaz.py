@@ -21,6 +21,9 @@ def esperar(seg, cond=lambda: False):
 
 reg.alternar_simulador()
 esperar(5, lambda: any(e.control for e in w.rx.lista()))
+esperar(20, lambda: all(e.listo()[0] for e in w.rx.lista()))
+print("tabla:", [reg.tabla.item(0, j).text() for j in range(1, 8)])
+print("sincronía:", reg.lbl_sinc.text())
 reg.cb_cond.setCurrentText("normal")
 reg.alternar()                       # iniciar
 esperar(14)
