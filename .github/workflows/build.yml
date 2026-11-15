@@ -1,4 +1,4 @@
-name: Compilar APK
+name: Compilar
 
 on:
   push:
@@ -8,8 +8,11 @@ permissions:
   contents: write
 
 jobs:
-  apk:
+  android:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -19,20 +22,54 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
-      - name: Compilar
-        run: gradle --no-daemon assembleDebug
-      - name: Renombrar
-        run: cp app/build/outputs/apk/debug/app-debug.apk IMU_Marcha.apk
+      - run: gradle --no-daemon assembleDebug
+      - run: cp app/build/outputs/apk/debug/app-debug.apk ../IMU_Marcha.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: IMU_Marcha
+          name: android
           path: IMU_Marcha.apk
-      - name: Publicar en Releases
-        if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Preparar Arduino
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install M5Unified
+          arduino-cli board listall | grep -i -E "stick" || true
+      - name: Compilar para M5StickC Plus2
+        run: |
+          FQBN=$(arduino-cli board listall | grep -i "stickc.*plus2" | awk '{print $NF}' | head -1)
+          echo "FQBN=$FQBN"
+          arduino-cli compile --fqbn "$FQBN" firmware/imu_marcha
+      - name: Compilar para M5StickS3
+        run: |
+          FQBN=$(arduino-cli board listall | grep -i "sticks3" | awk '{print $NF}' | head -1)
+          echo "FQBN=$FQBN"
+          arduino-cli compile --fqbn "${FQBN:-esp32:esp32:esp32s3}" firmware/imu_marcha
+      - name: Compilar para ESP32 + MPU-6050
+        run: |
+          mkdir -p /tmp/mpu/imu_marcha
+          sed -e 's|^#define EQUIPO_M5STICK|// #define EQUIPO_M5STICK|' -e 's|^// #define EQUIPO_MPU6050|#define EQUIPO_MPU6050|' \
+            firmware/imu_marcha/imu_marcha.ino > /tmp/mpu/imu_marcha/imu_marcha.ino
+          arduino-cli compile --fqbn esp32:esp32:esp32 /tmp/mpu/imu_marcha
+
+  publicar:
+    needs: [android, firmware]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: apk-${{ github.run_number }}
+          path: art
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
           name: IMU Marcha (versión ${{ github.run_number }})
-          body: APK compilada automáticamente desde ${{ github.sha }}. Descárgala desde el teléfono e instálala.
-          files: IMU_Marcha.apk
+          body: Compilado automáticamente desde ${{ github.sha }}.
+          files: art/*
           make_latest: true

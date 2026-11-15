@@ -57,10 +57,13 @@ class MainActivity : Activity() {
     private var emisor: Emisor? = null
     private lateinit var txtEmisor: TextView
     private lateinit var btnEmisor: Button
+    private lateinit var btnRespaldo: Button
     private lateinit var rbSimulada: RadioButton
     private lateinit var edFrec: EditText
     private lateinit var edDestino: EditText
     private var inicioEmisor = 0L
+    private var control: Control? = null
+    private val carpetaRespaldo by lazy { java.io.File(getExternalFilesDir(null), "respaldo") }
 
     // receptor
     private var receptor: Receptor? = null
@@ -120,11 +123,13 @@ class MainActivity : Activity() {
         mostrar(0)
         ui.postDelayed({ medirCompatibilidad() }, 600)
         ui.post(refresco)
+        control = Control({ emisor }, carpetaRespaldo).also { it.start() }
     }
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
         emisor?.detener()
+        control?.detener()
         detenerReceptor()
         super.onDestroy()
     }
@@ -187,6 +192,28 @@ class MainActivity : Activity() {
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
         return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
+
+    private fun redWifi(): android.net.Network? {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        @Suppress("DEPRECATION")
+        return cm.allNetworks.firstOrNull { cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true }
+    }
+
+    /** Dirección de difusión de la red WiFi (por ejemplo 192.168.4.255) y la IP del celular en ella. */
+    private fun datosWifi(): Pair<String, String>? {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val red = redWifi() ?: return null
+        val la = cm.getLinkProperties(red)?.linkAddresses?.firstOrNull { it.address is java.net.Inet4Address } ?: return null
+        val ip = la.address.address
+        val pref = la.prefixLength
+        val mascara = if (pref == 0) 0 else (-1 shl (32 - pref))
+        val ipInt = ((ip[0].toInt() and 255) shl 24) or ((ip[1].toInt() and 255) shl 16) or ((ip[2].toInt() and 255) shl 8) or (ip[3].toInt() and 255)
+        val b = ipInt or mascara.inv()
+        val difusion = "${(b ushr 24) and 255}.${(b ushr 16) and 255}.${(b ushr 8) and 255}.${b and 255}"
+        return Pair(difusion, la.address.hostAddress ?: "")
+    }
+
+    private fun difusionWifi(): String? = datosWifi()?.first
 
     private fun informeCompatibilidad(r: Compatibilidad.Resultado): String {
         val sb = StringBuilder()
@@ -264,13 +291,23 @@ class MainActivity : Activity() {
         val fila = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fila.addView(Button(this).apply { text = "Este teléfono"; isAllCaps = false; setOnClickListener { edDestino.setText("127.0.0.1") } },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        fila.addView(Button(this).apply { text = "Toda la red WiFi"; isAllCaps = false; setOnClickListener { edDestino.setText("255.255.255.255") } },
+        fila.addView(Button(this).apply { text = "Toda la red WiFi"; isAllCaps = false; setOnClickListener { edDestino.setText(difusionWifi() ?: "255.255.255.255") } },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         ll.addView(fila)
         ll.addView(parrafo("«Este teléfono» sirve para probar todo con un solo celular (emisor y receptor a la vez). " +
-            "«Toda la red WiFi» envía a otro equipo de la misma red, por ejemplo el PC con ver_imu.py.", 12f))
+            "«Toda la red WiFi» envía a otro equipo de la misma red, por ejemplo el PC con la app de Windows o ver_imu.py.\n\n" +
+            "Mientras el emisor está activo, la app de Windows puede iniciar y detener el registro a distancia; " +
+            "el celular guarda además un respaldo propio que el PC descarga al terminar.", 12f))
         btnEmisor = Button(this).apply { text = "Iniciar emisor"; isAllCaps = false; setOnClickListener { alternarEmisor() } }
         ll.addView(btnEmisor)
+        btnRespaldo = Button(this).apply {
+            text = "Grabar respaldo aquí"; isAllCaps = false; isEnabled = false
+            setOnClickListener {
+                val e = emisor ?: return@setOnClickListener
+                if (e.grabando) e.detenerGrabacion() else e.iniciarGrabacion("local_" + nombrePorDefecto())
+            }
+        }
+        ll.addView(btnRespaldo)
         txtEmisor = parrafo("Detenido.").apply { typeface = Typeface.MONOSPACE; textSize = 13f }
         ll.addView(txtEmisor)
         return sc
@@ -281,14 +318,18 @@ class MainActivity : Activity() {
         if (e != null) {
             e.detener(); emisor = null
             btnEmisor.text = "Iniciar emisor"
+            btnRespaldo.isEnabled = false
             txtEmisor.text = "Detenido. Paquetes enviados: ${e.enviados}"
         } else {
             if (midiendo) { txtEmisor.text = "Espera que termine la prueba de compatibilidad."; return }
             val f = edFrec.text.toString().replace(',', '.').toDoubleOrNull() ?: 1.9
-            val nuevo = Emisor(sm, edDestino.text.toString().trim(), rbSimulada.isChecked, f)
+            val dest = edDestino.text.toString().trim()
+            val red = if (dest.startsWith("127.")) null else redWifi()
+            val nuevo = Emisor(sm, dest, rbSimulada.isChecked, f, carpetaRespaldo, red)
             emisor = nuevo; inicioEmisor = System.currentTimeMillis()
             nuevo.start()
             btnEmisor.text = "Detener emisor"
+            btnRespaldo.isEnabled = true
         }
         mantenerPantalla()
     }
@@ -428,10 +469,15 @@ class MainActivity : Activity() {
             emisor?.let { e ->
                 val s = (System.currentTimeMillis() - inicioEmisor) / 1000.0
                 val tasa = if (s > 0) e.enviados * Paquete.POR_PAQUETE / s else 0.0
+                val ip = datosWifi()?.second ?: "sin WiFi"
+                val resp = if (e.grabando) String.format(Locale.US, "GRABANDO respaldo «%s» · %.0f s · %d kB",
+                    e.sesion, (System.currentTimeMillis() - e.inicioGrabacion) / 1000.0, e.bytesGrabados / 1024)
+                    else "Respaldo detenido (se controla desde el PC)"
+                btnRespaldo.text = if (e.grabando) "Detener respaldo" else "Grabar respaldo aquí"
                 txtEmisor.text = String.format(Locale.US,
-                    "Enviando a %s:%d\nPaquetes: %d · %.1f muestras/s · %.0f s%s",
-                    edDestino.text, Paquete.PUERTO, e.enviados, tasa, s,
-                    e.error?.let { "\nError: $it" } ?: "")
+                    "Enviando a %s:%d\nPaquetes: %d · %.1f muestras/s · %.0f s\n%s\nControl: http://%s:%d%s%s",
+                    edDestino.text, Paquete.PUERTO, e.enviados, tasa, s, resp, ip, Control.PUERTO,
+                    e.error?.let { "\nError: $it" } ?: "", control?.error?.let { "\nControl: $it" } ?: "")
             }
             receptor?.let { r ->
                 r.eje = spEje.selectedItemPosition

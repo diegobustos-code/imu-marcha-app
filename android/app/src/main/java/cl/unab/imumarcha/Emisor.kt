@@ -7,6 +7,9 @@ import android.hardware.SensorManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import java.io.BufferedOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -23,11 +26,51 @@ class Emisor(
     private val sm: SensorManager,
     private val destino: String,
     private val simulada: Boolean,
-    private val frecSim: Double
+    private val frecSim: Double,
+    private val carpetaRespaldo: File,
+    private val red: android.net.Network? = null
 ) : Thread("emisor"), SensorEventListener {
     @Volatile var activo = true
     @Volatile var enviados = 0L
     @Volatile var error: String? = null
+    @Volatile var secuencia = 0L
+
+    // respaldo local (mismo formato que el Stick: paquetes de 164 bytes, uno tras otro)
+    @Volatile var grabando = false
+    @Volatile var sesion = ""
+    @Volatile var bytesGrabados = 0L
+    @Volatile var inicioGrabacion = 0L
+    private var salida: BufferedOutputStream? = null
+    private val lockArchivo = Object()
+
+    fun iniciarGrabacion(nombre: String): Boolean {
+        synchronized(lockArchivo) {
+        if (grabando) return true
+        var n = nombre.filter { it.isLetterOrDigit() || it == '_' || it == '-' }.take(40)
+        if (n.isEmpty()) n = "sesion_" + System.currentTimeMillis() / 1000
+        carpetaRespaldo.mkdirs()
+        salida = BufferedOutputStream(FileOutputStream(File(carpetaRespaldo, "$n.bin")))
+        sesion = n; bytesGrabados = 0; inicioGrabacion = System.currentTimeMillis()
+        grabando = true
+        return true
+        }
+    }
+
+    fun detenerGrabacion() {
+        synchronized(lockArchivo) {
+            if (!grabando) return
+            grabando = false
+            try { salida?.flush(); salida?.close() } catch (_: Exception) {}
+            salida = null
+        }
+    }
+
+    private fun respaldar(bytes: ByteArray) {
+        synchronized(lockArchivo) {
+            if (!grabando) return
+            try { salida?.write(bytes); bytesGrabados += bytes.size } catch (e: Exception) { error = e.message; grabando = false }
+        }
+    }
 
     private val acc = DoubleArray(3)
     private val gir = DoubleArray(3)
@@ -58,6 +101,7 @@ class Emisor(
         try {
             socket = DatagramSocket()
             socket.broadcast = true
+            red?.bindSocket(socket)          // salir por el WiFi aunque no tenga internet
             val dir = InetAddress.getByName(destino)
             val periodo = 10_000_000L                      // 10 ms en ns
             var proximo = SystemClock.elapsedRealtimeNanos()
@@ -87,14 +131,21 @@ class Emisor(
                     Paquete.aCuentas(w[1], Paquete.ESC_GIRO), Paquete.aCuentas(w[2], Paquete.ESC_GIRO)))
                 if (lote.size == Paquete.POR_PAQUETE) {
                     val bytes = Paquete.codificar(sec++, lote)
-                    socket.send(DatagramPacket(bytes, bytes.size, dir, Paquete.PUERTO))
-                    enviados++
+                    secuencia = sec
+                    respaldar(bytes)
+                    try {
+                        socket.send(DatagramPacket(bytes, bytes.size, dir, Paquete.PUERTO))
+                        enviados++
+                    } catch (e: Exception) {
+                        error = e.message                 // se sigue respaldando aunque falle la red
+                    }
                     lote.clear()
                 }
             }
         } catch (e: Exception) {
             if (activo) error = e.message ?: e.toString()
         } finally {
+            detenerGrabacion()
             socket?.close()
             sm.unregisterListener(this)
             hilo?.quitSafely()
