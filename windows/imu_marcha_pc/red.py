@@ -10,6 +10,12 @@ COMANDOS_RESERVA = (
 )
 
 
+COMANDOS_WMP = (
+    "sc.exe stop WMPNetworkSvc\n"
+    "sc.exe config WMPNetworkSvc start= disabled"
+)
+
+
 def _ejecutar(cmd):
     try:
         flags = 0x08000000 if os.name == "nt" else 0            # CREATE_NO_WINDOW
@@ -48,6 +54,14 @@ def diagnosticar(puerto=5005):
         for pid in ocupados:
             fila = _ejecutar(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"]).strip().split(",")
             nombres.append(f"{fila[0].strip(chr(34))} (PID {pid})" if fila and fila[0] else f"PID {pid}")
+        if any("wmpnetwk" in n.lower() for n in nombres):
+            return "wmp", (
+                f"El puerto {puerto} lo usa el servicio de Windows «Uso compartido de red del Reproductor de Windows "
+                "Media» (wmpnetwk.exe), que sirve para compartir música y videos con otros equipos de la casa. "
+                "No lo necesita casi nadie y se puede desactivar sin problemas.\n\n"
+                "Solución (una sola vez): abrir PowerShell como administrador y ejecutar estos dos comandos:\n\n"
+                f"{COMANDOS_WMP}\n\n"
+                "La app se conecta sola apenas el puerto quede libre.")
         return "ocupado", (f"El puerto {puerto} lo está usando otro programa: {', '.join(nombres)}.\n\n"
                            "Solución: ciérralo (puede ser otra ventana de IMU Marcha, ver_imu.py o el simulador "
                            "en otra ventana). La app vuelve a intentar sola cada 3 segundos.")

@@ -409,13 +409,14 @@ class PestanaRegistro(QtWidgets.QWidget):
         caja.setWindowTitle("Puerto 5005 bloqueado")
         caja.setIcon(QtWidgets.QMessageBox.Warning)
         caja.setText(texto)
-        if causa == "reservado":
+        comandos = {"reservado": RED.COMANDOS_RESERVA, "wmp": RED.COMANDOS_WMP}.get(causa)
+        if comandos:
             copiar = caja.addButton("Copiar comandos", QtWidgets.QMessageBox.ActionRole)
             copiar.setIcon(E.icono("copiar"))
         caja.addButton("Cerrar", QtWidgets.QMessageBox.AcceptRole)
         caja.exec()
-        if causa == "reservado" and caja.clickedButton() is copiar:
-            QtWidgets.QApplication.clipboard().setText(RED.COMANDOS_RESERVA)
+        if comandos and caja.clickedButton() is copiar:
+            QtWidgets.QApplication.clipboard().setText(comandos)
             self.escribir("Comandos copiados. Pégalos en PowerShell abierto como administrador.")
 
     def _estado(self, eq):
