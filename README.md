@@ -73,3 +73,9 @@ Todas las sesiones procesadas se reúnen en `resultados_etapa2.csv`.
 
 Cada push compila la APK, el firmware (tres placas) y el ejecutable de Windows con GitHub Actions, corre las
 pruebas y publica todo en *Releases*.
+
+## Uso de inteligencia artificial
+
+El firmware, las aplicaciones y parte de esta documentación se desarrollaron con asistencia de Claude
+(Anthropic); por eso aparece como colaborador en los commits. El diseño del estudio, las decisiones
+metodológicas, la revisión y las pruebas son del autor, que es responsable del contenido.
