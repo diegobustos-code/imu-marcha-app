@@ -291,8 +291,8 @@ class MainActivity : Activity() {
             }
         }
         ll.addView(btnRemoto)
-        ll.addView(parrafo("Modo remoto: deja el celular en el cinturón con este modo activo. La app de Windows lo "
-            "detecta, lo enciende y lo apaga sola, e inicia y detiene el registro sin tocar el teléfono. Funciona con la "
+        ll.addView(parrafo("Modo remoto: deja el celular en el cinturón con este modo activo. La app de Windows lo " +
+            "detecta, lo enciende y lo apaga sola, e inicia y detiene el registro sin tocar el teléfono. Funciona con la " +
             "pantalla apagada. El celular y el PC deben estar en la misma red WiFi (por ejemplo, IMU-Marcha).", 12f))
         ll.addView(parrafo("Uso manual (pruebas):", 13f))
         ll.addView(parrafo("Hace de Stick: envía la aceleración y el giro del teléfono (o una marcha simulada) " +
