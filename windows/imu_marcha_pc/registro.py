@@ -5,6 +5,7 @@ puede recibir a la vez del celular y de cualquier IMU (M5StickS3, M5StickC Plus2
 """
 import collections
 import json
+import os
 import socket
 import threading
 import time
@@ -34,6 +35,19 @@ def pedir(ip, ruta, timeout=2.0, binario=False):
     return datos if binario else json.loads(datos.decode("utf-8"))
 
 
+def pedir_reintentando(ip, ruta, intentos=3, espera=1.0, **kw):
+    """Igual que pedir(), pero reintenta si la red falla (WiFi intermitente)."""
+    ultimo = None
+    for k in range(intentos):
+        try:
+            return pedir(ip, ruta, **kw)
+        except Exception as e:          # noqa: BLE001
+            ultimo = e
+            if k < intentos - 1:
+                time.sleep(espera)
+    raise ultimo
+
+
 class Equipo:
     """Estado de un equipo que está enviando datos."""
 
@@ -59,14 +73,18 @@ class Equipo:
         self._sinc_cache = (0.0, None)
         # registro en curso
         self.grabando = False
-        self.paquetes = []           # (secuencia, matriz, t_pc)
+        self.diario = None           # archivo vivo_<equipo>.dat de la sesión
+        self._ult_flush = 0.0
         self.rec_recibidos = 0
         self.rec_perdidos = 0
+        self.rec_reinicios = 0
 
-    def recibir(self, sec, m, t_pc):
+    def recibir(self, sec, m, t_pc, datos=None):
         with self.lock:
             if self.ultima_sec is not None and sec < self.ultima_sec and self.ultima_sec - sec > 50:
                 self.reinicios += 1
+                if self.grabando:
+                    self.rec_reinicios += 1
                 self.reloj.reinicio()
                 self.sinc.reiniciar()
                 self.recientes.clear()
@@ -86,8 +104,16 @@ class Equipo:
             while self.recientes and t_pc - self.recientes[0][0] > 10:
                 self.recientes.popleft()
             if self.grabando:
-                self.paquetes.append((sec, m.copy(), t_pc))
                 self.rec_recibidos += 1
+                if self.diario is not None:
+                    try:
+                        self.diario.write(P.registro_diario(t_pc, datos if datos is not None else P.codificar(sec, m)))
+                        if t_pc - self._ult_flush > 1.0:          # al disco al menos una vez por segundo
+                            self.diario.flush()
+                            os.fsync(self.diario.fileno())
+                            self._ult_flush = t_pc
+                    except OSError:
+                        pass
 
     def ventana(self):
         with self.lock:
@@ -184,7 +210,7 @@ class Receptor(threading.Thread):
                 if eq is None:
                     eq = self.equipos[ip] = Equipo(ip)
                     threading.Thread(target=self.identificar, args=(eq,), daemon=True).start()
-            eq.recibir(d[0], d[1], time.time())
+            eq.recibir(d[0], d[1], time.time(), datos)
         s.close()
 
     def identificar(self, eq):
@@ -223,8 +249,263 @@ def etiqueta_archivo(eq):
     return limpiar(eq.nombre.replace(" ", "_").replace("+", "")) or eq.ip.replace(".", "_")
 
 
+def escribir_json(ruta, datos):
+    """Escritura atómica: primero a un temporal y después se reemplaza (un corte no deja el archivo a medias)."""
+    ruta = Path(ruta)
+    tmp = ruta.with_suffix(ruta.suffix + ".tmp")
+    tmp.write_text(json.dumps(datos, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    os.replace(tmp, ruta)
+
+
+def leer_json(ruta, defecto=None):
+    try:
+        return json.loads(Path(ruta).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return defecto
+
+
+# ---------------------------------------------------------------- respaldo del equipo
+def archivos_de_sesion(lista, sesion):
+    """Del listado /archivos, los de esta sesión en orden: X.bin, X_cont1.bin, X_cont2.bin…"""
+    nombres = {f["nombre"].lstrip("/"): f["bytes"] for f in lista}
+    orden = []
+    if f"{sesion}.bin" in nombres:
+        orden.append(f"{sesion}.bin")
+    k = 1
+    while f"{sesion}_cont{k}.bin" in nombres:
+        orden.append(f"{sesion}_cont{k}.bin")
+        k += 1
+    return [(n, nombres[n]) for n in orden]
+
+
+def descargar_respaldo(ip, sesion, carpeta, etiqueta, intentos=3):
+    """Descarga todos los archivos de respaldo de la sesión (el principal y los de continuación después
+    de un reinicio), comprueba su tamaño y devuelve una lista de tramos de paquetes."""
+    lista = pedir_reintentando(ip, "/archivos", intentos=intentos, timeout=5)
+    archivos = archivos_de_sesion(lista, sesion)
+    if not archivos:
+        raise FileNotFoundError(f"el equipo no tiene el respaldo {sesion}.bin")
+    tramos = []
+    for k, (nombre, tam) in enumerate(archivos):
+        destino = carpeta / (f"respaldo_{etiqueta}.bin" if k == 0 else f"respaldo_{etiqueta}_cont{k}.bin")
+        for intento in range(intentos):
+            try:
+                datos = pedir(ip, "/archivo?n=" + urllib.parse.quote(nombre), timeout=60, binario=True)
+                if len(datos) != tam:
+                    raise IOError(f"descarga incompleta de {nombre} ({len(datos)} de {tam} bytes)")
+                break
+            except Exception:  # noqa: BLE001
+                if intento == intentos - 1:
+                    raise
+                time.sleep(1.5)
+        tmp = destino.with_suffix(".tmp")
+        tmp.write_bytes(datos)
+        os.replace(tmp, destino)
+        tramos.append(P.leer_bin(destino))
+    return tramos
+
+
+def respaldo_local(carpeta, etiqueta):
+    """Tramos del respaldo ya descargado antes (si existe)."""
+    tramos = []
+    base = carpeta / f"respaldo_{etiqueta}.bin"
+    if base.exists():
+        tramos.append(P.leer_bin(base))
+        k = 1
+        while (carpeta / f"respaldo_{etiqueta}_cont{k}.bin").exists():
+            tramos.append(P.leer_bin(carpeta / f"respaldo_{etiqueta}_cont{k}.bin"))
+            k += 1
+    return tramos
+
+
+# ---------------------------------------------------------------- armado de los archivos de un equipo
+def armar_equipo(carpeta, info, vivos, tramos_resp):
+    """Une lo recibido en vivo con el respaldo, tramo por tramo (un tramo por cada encendido del equipo),
+    y escribe imu_<equipo>.csv y paquetes_<equipo>.csv. Devuelve el resumen para sesion.json."""
+    etiqueta = info["etiqueta"]
+    tramos_vivo = P.separar_tramos(vivos)
+    n = max(len(tramos_vivo), len(tramos_resp))
+    tramos_finales, recuperados, faltantes, perdidos_vivo = [], 0, 0, 0
+    for k in range(n):
+        tv = tramos_vivo[k] if k < len(tramos_vivo) else []
+        tr = tramos_resp[k] if k < len(tramos_resp) else []
+        sv = {s for s, _, _ in tv}
+        if tv:
+            perdidos_vivo += max(max(sv) - min(sv) + 1 - len(sv), 0)
+        comb = {}
+        for s_, m in tr:
+            comb.setdefault(s_, m)
+        for s_, m, _ in tv:
+            comb.setdefault(s_, m)
+        if tr:
+            lo, hi = min(s_ for s_, _ in tr), max(s_ for s_, _ in tr)
+            if tv:      # lo recibido en vivo justo antes de /inicio o después de /fin también sirve
+                lo, hi = min(lo, min(sv)), max(hi, max(sv))
+            recuperados += len(set(comb) - sv)
+        orden = sorted(comb.items())
+        if orden:
+            faltantes += orden[-1][0] - orden[0][0] + 1 - len(orden)
+        tramos_finales.append(orden)
+    df, reinicios = P.paquetes_a_tabla(None, tramos=tramos_finales)
+    if len(df):
+        P.guardar_csv(df, carpeta / f"imu_{etiqueta}.csv")
+    reloj, relojes = None, []
+    if vivos and len(df):
+        for k, tv in enumerate(tramos_vivo):
+            sub = df[df["tramo"] == k]
+            ult = sub.groupby("secuencia")["t_s"].max()
+            pares = [(ult[s_], t) for s_, _, t in tv if s_ in ult.index]
+            r = R.ajustar(*np.array(pares).T) if len(pares) >= 10 else None
+            if r:
+                # hora del PC (epoch) en t_s = 0 de este tramo
+                r["inicio_pc"] = r["desfase_s"]
+                r["inicio_pc_hora"] = datetime.fromtimestamp(r["desfase_s"]).isoformat(timespec="milliseconds")
+                r["formula"] = "t_pc = inicio_pc + t_s * (1 + deriva_ppm / 1e6)"
+                r["tramo"] = k
+            relojes.append(r)
+        reloj = relojes[0] if relojes else None
+        pd.DataFrame({"secuencia": [s_ for s_, _, _ in vivos],
+                      "t_pc_s": [round(t - vivos[0][2], 4) for _, _, t in vivos],
+                      "hora_pc": [datetime.fromtimestamp(t).isoformat(timespec="milliseconds") for _, _, t in vivos]}
+                     ).to_csv(carpeta / f"paquetes_{etiqueta}.csv", index=False)
+    return {
+        "equipo": info["nombre"], "ip": info["ip"], "mac": info.get("mac", ""), "etiqueta": etiqueta,
+        "archivo": f"imu_{etiqueta}.csv", "paquetes_en_vivo": len(vivos), "perdidos_en_vivo": perdidos_vivo,
+        "recuperados_del_respaldo": recuperados, "faltantes_final": max(faltantes, 0),
+        "muestras": int(len(df)), "duracion_s": round(float(df["t_s"].iloc[-1]), 2) if len(df) else 0.0,
+        "reinicios": reinicios, "con_respaldo": bool(tramos_resp), "tramos_respaldo": len(tramos_resp),
+        "reloj": reloj, "reloj_por_tramo": relojes if len(relojes) > 1 else None,
+    }
+
+
+# ---------------------------------------------------------------- respaldos pendientes
+def ruta_pendientes(base):
+    return Path(base) / "pendientes.json"
+
+
+def leer_pendientes(base):
+    return leer_json(ruta_pendientes(base), []) or []
+
+
+def guardar_pendientes(base, lista):
+    Path(base).mkdir(parents=True, exist_ok=True)
+    escribir_json(ruta_pendientes(base), lista)
+
+
+def agregar_pendiente(base, item):
+    lista = [p for p in leer_pendientes(base) if not (p["carpeta"] == item["carpeta"] and p["etiqueta"] == item["etiqueta"])]
+    lista.append(item)
+    guardar_pendientes(base, lista)
+
+
+def cerrar_y_bajar(info, sesion, carpeta, mensajes, intentos=3):
+    """Envía /fin si el equipo sigue grabando esta sesión y descarga el respaldo.
+    Devuelve (tramos_respaldo, fin_ok, descarga_ok)."""
+    ip = info["ip"]
+    fin_ok = False
+    try:
+        est = pedir_reintentando(ip, "/estado", intentos=intentos, timeout=2)
+        if est.get("grabando") and est.get("sesion") == sesion:
+            pedir_reintentando(ip, "/fin", intentos=intentos, timeout=3)
+        fin_ok = True
+    except Exception as e:  # noqa: BLE001
+        mensajes.append(f"{info['nombre']}: no respondió a /fin ({e}).")
+        return [], False, False
+    try:
+        return descargar_respaldo(ip, sesion, carpeta, info["etiqueta"], intentos=intentos), fin_ok, True
+    except Exception as e:  # noqa: BLE001
+        mensajes.append(f"{info['nombre']}: no se pudo descargar el respaldo ({e}).")
+        return [], fin_ok, False
+
+
+def actualizar_equipo_en_sesion(carpeta, resumen):
+    meta = leer_json(carpeta / "sesion.json", {}) or {}
+    eqs = [e for e in meta.get("equipos", []) if e.get("etiqueta") != resumen["etiqueta"]]
+    eqs.append(resumen)
+    meta["equipos"] = eqs
+    meta["pendientes"] = [p for p in meta.get("pendientes", []) if p != resumen["etiqueta"]]
+    escribir_json(carpeta / "sesion.json", meta)
+
+
+def procesar_pendientes(base, equipos_activos, mensajes=None):
+    """Intenta cerrar y descargar los respaldos que quedaron pendientes. equipos_activos: lista de Equipo
+    que hoy están enviando datos (se reconocen por su MAC o, si no la tienen, por su IP)."""
+    mensajes = mensajes if mensajes is not None else []
+    lista = leer_pendientes(base)
+    if not lista:
+        return mensajes
+    quedan = []
+    for p in lista:
+        eq = next((e for e in equipos_activos if e.control and e.activo() and
+                   ((p.get("mac") and e.mac == p.get("mac")) or (not p.get("mac") and e.ip == p["ip"]))), None)
+        if eq is None:
+            quedan.append(p)
+            continue
+        info = dict(p, ip=eq.ip)
+        carpeta = Path(p["carpeta"])
+        tramos, _, ok = cerrar_y_bajar(info, p["sesion"], carpeta, mensajes, intentos=2)
+        if not ok:
+            quedan.append(p)
+            continue
+        vivos = P.leer_diario(carpeta / f"vivo_{p['etiqueta']}.dat")
+        resumen = armar_equipo(carpeta, info, vivos, tramos)
+        actualizar_equipo_en_sesion(carpeta, resumen)
+        mensajes.append(f"{p['nombre']}: respaldo pendiente de {p['sesion']} recuperado; "
+                        f"faltantes {resumen['faltantes_final']}.")
+    guardar_pendientes(base, quedan)
+    return mensajes
+
+
+# ---------------------------------------------------------------- sesión
+def finalizar(carpeta, equipos_info, meta, mensajes, progreso=lambda t: None, recuperada=False):
+    """Cierra una sesión (normal o recuperada): /fin, descarga, unión y sesion.json."""
+    base = Path(meta["base"])
+    resumen, pendientes = [], []
+    for info in equipos_info:
+        tramos, fin_ok, ok = [], False, False
+        if info.get("control"):
+            progreso(f"Cerrando y descargando el respaldo de {info['nombre']}…")
+            tramos, fin_ok, ok = cerrar_y_bajar(info, meta["sesion"], carpeta, mensajes)
+        if not ok:
+            tramos = respaldo_local(carpeta, info["etiqueta"])      # por si ya se había bajado antes
+        vivos = P.leer_diario(carpeta / f"vivo_{info['etiqueta']}.dat")
+        r = armar_equipo(carpeta, info, vivos, tramos)
+        if info.get("control") and not ok:
+            pendientes.append(info["etiqueta"])
+            agregar_pendiente(base, {**info, "carpeta": str(carpeta), "sesion": meta["sesion"]})
+            mensajes.append(f"{info['nombre']}: el respaldo quedó pendiente; se descargará solo cuando el equipo "
+                            "vuelva a la red (o con «Recuperar respaldos»).")
+        resumen.append(r)
+    meta = dict(meta)
+    meta.update({"equipos": resumen, "mensajes": mensajes, "pendientes": pendientes, "recuperada": recuperada})
+    escribir_json(carpeta / "sesion.json", meta)
+    (carpeta / "en_curso.json").unlink(missing_ok=True)
+    return meta
+
+
+def sesiones_sin_terminar(base):
+    return sorted(Path(base).glob("*/*/en_curso.json")) if Path(base).exists() else []
+
+
+def recuperar_sesion(carpeta, progreso=lambda t: None):
+    """Cierra una sesión que quedó abierta porque el PC se cerró durante el registro."""
+    carpeta = Path(carpeta)
+    meta = leer_json(carpeta / "en_curso.json")
+    if meta is None:
+        raise FileNotFoundError("no hay en_curso.json")
+    mensajes = [f"Sesión recuperada después de un cierre inesperado del PC (iniciada {meta['inicio']})."]
+    fin = datetime.now()
+    meta["fin"] = fin.isoformat(timespec="seconds")
+    meta["duracion_s"] = None       # se desconoce el momento real del término
+    return finalizar(carpeta, meta["equipos_info"], meta, mensajes, progreso, recuperada=True)
+
+
 class Registro:
-    """Inicia, detiene y guarda una sesión con todos los equipos elegidos."""
+    """Inicia, detiene y guarda una sesión con todos los equipos elegidos.
+
+    Protecciones: cada paquete se escribe al disco apenas llega (vivo_<equipo>.dat), la sesión queda
+    marcada con en_curso.json hasta que termina bien, las órdenes se reintentan, y si un respaldo no se
+    puede bajar queda en pendientes.json para descargarlo cuando el equipo vuelva."""
 
     def __init__(self, equipos, base, participante, condicion, repeticion, notas=""):
         self.equipos = equipos
@@ -237,98 +518,43 @@ class Registro:
         self.carpeta = carpeta_sesion(base, participante, self.sesion)
         self.inicio = None
         self.mensajes = []
+        self.infos = []
+
+    def meta_base(self):
+        return {"sesion": self.sesion, "participante": self.participante, "condicion": self.condicion,
+                "repeticion": self.repeticion, "notas": self.notas, "base": str(self.base),
+                "inicio": self.inicio.isoformat(timespec="seconds"), "fs_hz": P.FS}
 
     def iniciar(self):
         self.carpeta.mkdir(parents=True, exist_ok=True)
+        # una sesión anterior con el mismo nombre no debe mezclarse con esta
+        for viejo in list(self.carpeta.glob("vivo_*.dat")) + list(self.carpeta.glob("respaldo_*.bin")):
+            viejo.unlink()
         self.inicio = datetime.now()
-        for eq in self.equipos:
+        self.infos = [{"ip": eq.ip, "mac": eq.mac, "nombre": eq.nombre, "etiqueta": etiqueta_archivo(eq),
+                       "control": bool(eq.control)} for eq in self.equipos]
+        escribir_json(self.carpeta / "en_curso.json", {**self.meta_base(), "equipos_info": self.infos})
+        for eq, info in zip(self.equipos, self.infos):
             with eq.lock:
-                eq.paquetes = []
-                eq.rec_recibidos = eq.rec_perdidos = 0
+                eq.diario = open(self.carpeta / f"vivo_{info['etiqueta']}.dat", "ab")
+                eq.rec_recibidos = eq.rec_perdidos = eq.rec_reinicios = 0
                 eq.grabando = True
             if eq.control:
                 try:
-                    pedir(eq.ip, "/inicio?sesion=" + urllib.parse.quote(self.sesion))
-                except Exception as e:
+                    pedir_reintentando(eq.ip, "/inicio?sesion=" + urllib.parse.quote(self.sesion), intentos=3, timeout=2)
+                except Exception as e:  # noqa: BLE001
                     self.mensajes.append(f"{eq.nombre}: no respondió a /inicio ({e}); se guarda solo lo recibido.")
 
     def detener(self, progreso=lambda txt: None):
         fin = datetime.now()
-        resumen = []
         for eq in self.equipos:
             with eq.lock:
                 eq.grabando = False
-                vivos = list(eq.paquetes)
-            if eq.control:
-                try:
-                    pedir(eq.ip, "/fin")
-                except Exception as e:
-                    self.mensajes.append(f"{eq.nombre}: no respondió a /fin ({e}).")
-            etiqueta = etiqueta_archivo(eq)
-            respaldo = []
-            if eq.control:
-                progreso(f"Descargando respaldo de {eq.nombre}…")
-                try:
-                    datos = pedir(eq.ip, "/archivo?n=" + urllib.parse.quote(self.sesion + ".bin"),
-                                  timeout=60, binario=True)
-                    (self.carpeta / f"respaldo_{etiqueta}.bin").write_bytes(datos)
-                    respaldo = P.leer_bin(self.carpeta / f"respaldo_{etiqueta}.bin")
-                except Exception as e:
-                    self.mensajes.append(f"{eq.nombre}: no se pudo descargar el respaldo ({e}).")
-            info = self.guardar_equipo(eq, etiqueta, vivos, respaldo)
-            resumen.append(info)
-        meta = {
-            "sesion": self.sesion, "participante": self.participante, "condicion": self.condicion,
-            "repeticion": self.repeticion, "notas": self.notas,
-            "inicio": self.inicio.isoformat(timespec="seconds"), "fin": fin.isoformat(timespec="seconds"),
-            "duracion_s": round((fin - self.inicio).total_seconds(), 1),
-            "equipos": resumen, "mensajes": self.mensajes, "fs_hz": P.FS,
-        }
-        (self.carpeta / "sesion.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-        return meta
-
-    def guardar_equipo(self, eq, etiqueta, vivos, respaldo):
-        seq_vivos = {s for s, _, _ in vivos}
-        combinados = {}
-        for s, m in respaldo:
-            combinados[s] = m
-        for s, m, _ in vivos:
-            combinados.setdefault(s, m)
-        recuperados = len(set(combinados) - seq_vivos) if respaldo else 0
-        orden = sorted(combinados.items())
-        if respaldo:
-            # se usa el tramo del respaldo (es el que el equipo grabó entre /inicio y /fin)
-            lo, hi = min(s for s, _ in respaldo), max(s for s, _ in respaldo)
-            orden = [(s, m) for s, m in orden if lo <= s <= hi] or orden
-        df, reinicios = P.paquetes_a_tabla(orden)
-        if len(df):
-            P.guardar_csv(df, self.carpeta / f"imu_{etiqueta}.csv")
-        reloj = None
-        if vivos and len(df):
-            # tiempo del equipo de la última muestra de cada paquete recibido en vivo
-            ult = df.groupby("secuencia")["t_s"].max()
-            pares = [(ult[s], t) for s, _, t in vivos if s in ult.index]
-            if pares:
-                a = np.array(pares)
-                reloj = R.ajustar(a[:, 0], a[:, 1])
-            if reloj:
-                reloj["inicio_pc"] = reloj["desfase_s"]          # hora del PC (epoch) en t_s = 0
-                reloj["inicio_pc_hora"] = datetime.fromtimestamp(reloj["desfase_s"]).isoformat(timespec="milliseconds")
-                reloj["formula"] = "t_pc = inicio_pc + t_s * (1 + deriva_ppm / 1e6)"
-        if vivos:
-            pd.DataFrame({"secuencia": [s for s, _, _ in vivos],
-                          "t_pc_s": [round(t - vivos[0][2], 4) for _, _, t in vivos],
-                          "hora_pc": [datetime.fromtimestamp(t).isoformat(timespec="milliseconds") for _, _, t in vivos]}
-                         ).to_csv(self.carpeta / f"paquetes_{etiqueta}.csv", index=False)
-        if orden:
-            esperados = orden[-1][0] - orden[0][0] + 1 if not reinicios else len(orden)
-            faltantes = max(esperados - len(orden), 0)
-        else:
-            esperados = faltantes = 0
-        return {
-            "equipo": eq.nombre, "ip": eq.ip, "mac": eq.mac, "archivo": f"imu_{etiqueta}.csv",
-            "paquetes_en_vivo": len(vivos), "perdidos_en_vivo": eq.rec_perdidos,
-            "recuperados_del_respaldo": recuperados, "faltantes_final": faltantes,
-            "muestras": int(len(df)), "duracion_s": round(float(df["t_s"].iloc[-1]), 2) if len(df) else 0.0,
-            "reinicios": reinicios, "con_respaldo": bool(respaldo), "reloj": reloj,
-        }
+                if eq.diario is not None:
+                    eq.diario.flush()
+                    os.fsync(eq.diario.fileno())
+                    eq.diario.close()
+                    eq.diario = None
+        meta = {**self.meta_base(), "fin": fin.isoformat(timespec="seconds"),
+                "duracion_s": round((fin - self.inicio).total_seconds(), 1)}
+        return finalizar(self.carpeta, self.infos, meta, self.mensajes, progreso)

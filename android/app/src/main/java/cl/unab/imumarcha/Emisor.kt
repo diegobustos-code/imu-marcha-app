@@ -34,6 +34,7 @@ class Emisor(
     @Volatile var enviados = 0L
     @Volatile var error: String? = null
     @Volatile var secuencia = 0L
+    val creado = System.currentTimeMillis()
 
     // respaldo local (mismo formato que el Stick: paquetes de 164 bytes, uno tras otro)
     @Volatile var grabando = false
@@ -49,6 +50,7 @@ class Emisor(
         var n = nombre.filter { it.isLetterOrDigit() || it == '_' || it == '-' }.take(40)
         if (n.isEmpty()) n = "sesion_" + System.currentTimeMillis() / 1000
         carpetaRespaldo.mkdirs()
+        carpetaRespaldo.listFiles()?.filter { it.name.startsWith("${n}_cont") }?.forEach { it.delete() }
         salida = BufferedOutputStream(FileOutputStream(File(carpetaRespaldo, "$n.bin")))
         sesion = n; bytesGrabados = 0; inicioGrabacion = System.currentTimeMillis()
         grabando = true
@@ -65,10 +67,16 @@ class Emisor(
         }
     }
 
+    private var ultimoFlush = 0L
+
     private fun respaldar(bytes: ByteArray) {
         synchronized(lockArchivo) {
             if (!grabando) return
-            try { salida?.write(bytes); bytesGrabados += bytes.size } catch (e: Exception) { error = e.message; grabando = false }
+            try {
+                salida?.write(bytes); bytesGrabados += bytes.size
+                val ahora = System.currentTimeMillis()
+                if (ahora - ultimoFlush > 1000) { salida?.flush(); ultimoFlush = ahora }   // al disco cada segundo
+            } catch (e: Exception) { error = e.message; grabando = false }
         }
     }
 

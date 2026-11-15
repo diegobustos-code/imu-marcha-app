@@ -15,6 +15,7 @@ from . import __version__
 from . import analisis as A
 from . import protocolo as P
 from . import reloj as R
+from . import registro as RG
 from .registro import Receptor, Registro, carpeta_sesion, nombre_sesion, pedir
 
 CARPETA_POR_DEFECTO = r"F:\Practica_I\Etapa2_datos"
@@ -125,6 +126,17 @@ class PestanaRegistro(QtWidgets.QWidget):
         izq.addWidget(self.btn)
         self.lbl_tiempo = QtWidgets.QLabel("Listo.")
         izq.addWidget(self.lbl_tiempo)
+        self.lbl_alerta = QtWidgets.QLabel()
+        self.lbl_alerta.setWordWrap(True)
+        self.lbl_alerta.setStyleSheet("background:#B00;color:white;padding:6px;font-weight:bold;")
+        self.lbl_alerta.hide()
+        izq.addWidget(self.lbl_alerta)
+        fila_p = QtWidgets.QHBoxLayout()
+        self.lbl_pend = QtWidgets.QLabel()
+        self.btn_recuperar = QtWidgets.QPushButton("Recuperar respaldos…")
+        self.btn_recuperar.clicked.connect(self.dialogo_respaldos)
+        fila_p.addWidget(self.lbl_pend, 1); fila_p.addWidget(self.btn_recuperar)
+        izq.addLayout(fila_p)
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(500)
         izq.addWidget(self.log, 1)
 
@@ -146,8 +158,14 @@ class PestanaRegistro(QtWidgets.QWidget):
         raiz.addWidget(wi); raiz.addLayout(der, 1)
 
         self.usar = {}
+        self.alertas_vistas = set()
+        self.trabajo_pend = None
         self.actualizar_nombre()
         self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self.refrescar); self.timer.start(500)
+        self.timer_pend = QtCore.QTimer(self); self.timer_pend.timeout.connect(self.revisar_pendientes)
+        self.timer_pend.start(5000)
+        QtCore.QTimer.singleShot(800, self.revisar_sin_terminar)
+        self.actualizar_pendientes()
 
     def escribir(self, txt):
         self.log.appendPlainText(time.strftime("%H:%M:%S  ") + txt)
@@ -244,7 +262,8 @@ class PestanaRegistro(QtWidgets.QWidget):
             self.lbl_sinc.setStyleSheet(f"color:{color};")
         # estado de batería cada ~5 s
         for eq in lista:
-            if eq.control and time.time() - getattr(eq, "_ult_estado", 0) > 5:
+            periodo = 2 if eq.grabando else 5
+            if eq.control and time.time() - getattr(eq, "_ult_estado", 0) > periodo:
                 eq._ult_estado = time.time()
                 QtCore.QThreadPool.globalInstance().start(lambda e=eq: self._estado(e))
         # gráfico del equipo seleccionado
@@ -270,6 +289,89 @@ class PestanaRegistro(QtWidgets.QWidget):
         if self.registro:
             seg = time.time() - self.inicio
             self.lbl_tiempo.setText(f"● GRABANDO {self.registro.sesion} · {seg:5.1f} s")
+            self.revisar_alertas()
+        else:
+            self.lbl_alerta.hide()
+
+    # ------------------------------------------------------------------ alertas y recuperación
+    def revisar_alertas(self):
+        avisos = []
+        for eq in self.registro.equipos:
+            sin_datos = time.time() - eq.ultimo_paquete
+            if sin_datos > 3:
+                avisos.append((f"{eq.ip}-datos", f"{eq.nombre}: no llegan datos hace {sin_datos:.0f} s "
+                               "(revisa que esté encendido y cerca; el respaldo interno sigue grabando)."))
+            est = eq.estado or {}
+            bat = est.get("bateria", -1)
+            if bat is not None and 0 <= bat < 15:
+                avisos.append((f"{eq.ip}-bat", f"{eq.nombre}: batería baja ({bat} %)."))
+            libre = est.get("libre_kb")
+            if libre is not None and libre < 200:
+                avisos.append((f"{eq.ip}-mem", f"{eq.nombre}: queda poca memoria para el respaldo ({libre} kB)."))
+            if eq.control and est and sin_datos < 3 and est.get("grabando") is False and \
+                    time.time() - self.inicio > 5:
+                avisos.append((f"{eq.ip}-grab", f"{eq.nombre}: dejó de guardar su respaldo "
+                               "(¿memoria llena o reinicio?). Lo recibido en vivo se sigue guardando."))
+            if eq.rec_reinicios:
+                avisos.append((f"{eq.ip}-rein{eq.rec_reinicios}", f"{eq.nombre}: se reinició durante el registro "
+                               f"({eq.rec_reinicios} vez/veces); el respaldo continúa en un archivo aparte."))
+        if avisos:
+            self.lbl_alerta.setText("⚠ " + "\n⚠ ".join(t for _, t in avisos))
+            self.lbl_alerta.show()
+            for clave, texto in avisos:
+                if clave not in self.alertas_vistas:
+                    self.alertas_vistas.add(clave)
+                    self.escribir("ALERTA: " + texto)
+                    QtWidgets.QApplication.beep()
+        else:
+            self.lbl_alerta.hide()
+
+    def actualizar_pendientes(self):
+        n = len(RG.leer_pendientes(self.ed_base.text()))
+        self.lbl_pend.setText(f"Respaldos pendientes: {n} (se bajan solos cuando el equipo vuelve)" if n else
+                              "Sin respaldos pendientes.")
+        self.lbl_pend.setStyleSheet("color:#B8860B;" if n else "color:#777;")
+
+    def revisar_pendientes(self):
+        self.actualizar_pendientes()
+        if self.registro is not None or (self.trabajo_pend and self.trabajo_pend.isRunning()):
+            return
+        base = self.ed_base.text()
+        if not RG.leer_pendientes(base):
+            return
+        equipos = self.rx.lista()
+
+        def tarea(_tr):
+            return RG.procesar_pendientes(base, equipos)
+
+        self.trabajo_pend = Trabajo(tarea)
+        self.trabajo_pend.listo.connect(lambda msgs: ([self.escribir(m) for m in msgs if "recuperado" in m],
+                                                      self.actualizar_pendientes()))
+        self.trabajo_pend.start()
+
+    def revisar_sin_terminar(self):
+        for f in RG.sesiones_sin_terminar(self.ed_base.text()):
+            carpeta = f.parent
+            if self.registro is not None and carpeta == self.registro.carpeta:
+                continue
+            r = QtWidgets.QMessageBox.question(
+                self, "Sesión sin terminar",
+                f"La sesión {carpeta.name} quedó abierta (el programa se cerró durante el registro).\n\n"
+                "¿Recuperarla ahora? Se cierra el registro en los equipos que sigan grabando, se descargan sus "
+                "respaldos y se unen con lo que alcanzó a llegar al PC.")
+            if r != QtWidgets.QMessageBox.Yes:
+                continue
+            self.escribir(f"Recuperando {carpeta.name}…")
+            tr = Trabajo(lambda _t, c=carpeta: RG.recuperar_sesion(c))
+            tr.listo.connect(self.registro_terminado)
+            tr.fallo.connect(lambda e: self.escribir("No se pudo recuperar:\n" + e))
+            self._recuperacion = tr
+            tr.start()
+            break
+
+    def dialogo_respaldos(self):
+        DialogoRespaldos(self, self.rx, self.ed_base.text()).exec()
+        self.actualizar_pendientes()
 
     def _estado(self, eq):
         try:
@@ -335,6 +437,8 @@ class PestanaRegistro(QtWidgets.QWidget):
 
     def registro_terminado(self, meta):
         self.registro = None
+        self.alertas_vistas.clear()
+        self.lbl_alerta.hide()
         self.btn.setEnabled(True)
         self.btn.setText("▶  Iniciar registro")
         self.btn.setStyleSheet("")
@@ -350,9 +454,107 @@ class PestanaRegistro(QtWidgets.QWidget):
                     self.escribir(f"   reloj: inicio {rl['inicio_pc_hora']} (±{rl['incertidumbre_ms']:.0f} ms), "
                                   f"deriva {rl['deriva_ppm']:+.0f} ppm")
             self.escribir(f"Sesión guardada en {carpeta_sesion(self.ed_base.text(), meta['participante'], meta['sesion'])}")
-            self.lbl_tiempo.setText(f"Guardado: {meta['sesion']} ({meta['duracion_s']} s)")
-            self.sp_rep.setValue(self.sp_rep.value() + 1)
+            if meta.get("pendientes"):
+                self.escribir("⚠ Quedaron respaldos pendientes; se descargarán solos cuando el equipo vuelva a la red.")
+            self.actualizar_pendientes()
+            dur = f"{meta['duracion_s']} s" if meta.get("duracion_s") is not None else "recuperada"
+            self.lbl_tiempo.setText(f"Guardado: {meta['sesion']} ({dur})")
+            if not meta.get("recuperada"):
+                self.sp_rep.setValue(self.sp_rep.value() + 1)
         self.actualizar_nombre()
+
+
+class DialogoRespaldos(QtWidgets.QDialog):
+    """Lista los respaldos guardados en cada equipo conectado y permite bajarlos a su sesión."""
+
+    def __init__(self, padre, rx, base):
+        super().__init__(padre)
+        self.setWindowTitle("Respaldos en los equipos")
+        self.resize(760, 420)
+        self.rx, self.base = rx, Path(base)
+        v = QtWidgets.QVBoxLayout(self)
+        v.addWidget(QtWidgets.QLabel("Respaldos guardados en la memoria de los equipos conectados. Al bajarlos se unen "
+                                     "con lo recibido en vivo y se rehace el CSV de la sesión."))
+        self.tabla = QtWidgets.QTableWidget(0, 5)
+        self.tabla.setHorizontalHeaderLabels(["", "Equipo", "Archivo", "Tamaño", "Sesión en el PC"])
+        self.tabla.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(self.tabla, 1)
+        self.lbl = QtWidgets.QLabel(); v.addWidget(self.lbl)
+        h = QtWidgets.QHBoxLayout()
+        for txt, fn in [("Actualizar", self.cargar), ("Bajar y unir los marcados", self.bajar),
+                        ("Borrar del equipo los marcados", self.borrar), ("Cerrar", self.accept)]:
+            b = QtWidgets.QPushButton(txt); b.clicked.connect(fn); h.addWidget(b)
+        v.addLayout(h)
+        self.filas = []
+        self.cargar()
+
+    def cargar(self):
+        self.filas = []
+        for eq in self.rx.lista():
+            if not (eq.control and eq.activo()):
+                continue
+            try:
+                lista = pedir(eq.ip, "/archivos", timeout=3)
+            except Exception as e:  # noqa: BLE001
+                self.lbl.setText(f"{eq.nombre}: no respondió ({e})")
+                continue
+            for f in lista:
+                nombre = f["nombre"].lstrip("/")
+                if not nombre.endswith(".bin"):
+                    continue
+                sesion = nombre[:-4].split("_cont")[0]
+                carpetas = sorted(self.base.glob(f"*/{sesion}"))
+                self.filas.append((eq, nombre, f["bytes"], sesion, carpetas[0] if carpetas else None))
+        self.tabla.setRowCount(len(self.filas))
+        for i, (eq, nombre, tam, sesion, carpeta) in enumerate(self.filas):
+            chk = QtWidgets.QTableWidgetItem(); chk.setCheckState(QtCore.Qt.Unchecked)
+            self.tabla.setItem(i, 0, chk)
+            for j, txt in enumerate([eq.nombre, nombre, f"{tam / 1024:.0f} kB", str(carpeta) if carpeta else "— (no existe)"], 1):
+                self.tabla.setItem(i, j, QtWidgets.QTableWidgetItem(txt))
+        self.lbl.setText(f"{len(self.filas)} respaldo(s) en {len({f[0].ip for f in self.filas})} equipo(s).")
+
+    def marcados(self):
+        return [self.filas[i] for i in range(self.tabla.rowCount())
+                if self.tabla.item(i, 0).checkState() == QtCore.Qt.Checked]
+
+    def bajar(self):
+        hechos = set()
+        msgs = []
+        for eq, nombre, tam, sesion, carpeta in self.marcados():
+            if carpeta is None or (eq.ip, sesion) in hechos:
+                continue
+            hechos.add((eq.ip, sesion))
+            meta = RG.leer_json(carpeta / "sesion.json", {}) or {}
+            info = next((e for e in meta.get("equipos", []) if e.get("mac") == eq.mac or e.get("ip") == eq.ip), None)
+            etiqueta = info["etiqueta"] if info else RG.etiqueta_archivo(eq)
+            datos = {"ip": eq.ip, "mac": eq.mac, "nombre": eq.nombre, "etiqueta": etiqueta, "control": True}
+            try:
+                tramos = RG.descargar_respaldo(eq.ip, sesion, carpeta, etiqueta)
+                vivos = P.leer_diario(carpeta / f"vivo_{etiqueta}.dat")
+                r = RG.armar_equipo(carpeta, datos, vivos, tramos)
+                RG.actualizar_equipo_en_sesion(carpeta, r)
+                RG.guardar_pendientes(self.base, [p for p in RG.leer_pendientes(self.base)
+                                                  if not (p["carpeta"] == str(carpeta) and p["etiqueta"] == etiqueta)])
+                msgs.append(f"{sesion}: unido, faltantes {r['faltantes_final']}")
+            except Exception as e:  # noqa: BLE001
+                msgs.append(f"{sesion}: error ({e})")
+        self.lbl.setText(" · ".join(msgs) or "Marca al menos un respaldo con sesión en el PC.")
+
+    def borrar(self):
+        sel = self.marcados()
+        if not sel:
+            return
+        r = QtWidgets.QMessageBox.question(self, "Borrar respaldos",
+                                           f"¿Borrar {len(sel)} archivo(s) de la memoria del equipo? "
+                                           "Hazlo solo si ya los bajaste.")
+        if r != QtWidgets.QMessageBox.Yes:
+            return
+        for eq, nombre, *_ in sel:
+            try:
+                pedir(eq.ip, "/borrar?n=" + nombre, timeout=3)
+            except Exception:  # noqa: BLE001
+                pass
+        self.cargar()
 
 
 # ====================================================================== 2. Procesar sesión

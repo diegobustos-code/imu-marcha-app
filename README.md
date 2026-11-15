@@ -13,6 +13,18 @@ frecuencia dominante de la marcha medida con cámara contra una IMU lumbar.
 Las tres partes hablan el mismo protocolo, así que cualquier combinación funciona: el PC recibe del celular y de
 cualquiera de las IMU al mismo tiempo, y los distingue por su dirección IP.
 
+## Protección de los datos
+
+| Falla | Qué hace el sistema |
+|---|---|
+| Se pierden paquetes por WiFi | La IMU guarda todo en su memoria; al detener, el PC baja el respaldo y rellena. |
+| El PC se cierra o se cuelga | Cada paquete se escribe al disco apenas llega (`vivo_<equipo>.dat`) y la sesión queda marcada con `en_curso.json`. Al abrir la app, ofrece recuperarla: cierra el registro en los equipos y baja sus respaldos. |
+| Corte total del WiFi al detener | Las órdenes se reintentan; si no hay caso, el respaldo queda en `pendientes.json` y se baja solo cuando el equipo vuelve a la red. |
+| La IMU se reinicia mientras graba | El respaldo se asienta cada segundo; al encender, la IMU sigue grabando en `<sesion>_contN.bin` y el PC une los tramos. |
+| La memoria de la IMU se llena | Cierra el archivo sin corromperlo y lo informa (`memoria_llena`). |
+| El celular apaga la pantalla | El emisor corre como servicio en primer plano y el respaldo se asienta cada segundo. |
+| Durante el registro | Alertas visibles y sonoras si un equipo deja de enviar más de 3 s, baja del 15 % de batería, se queda sin memoria, deja de grabar o se reinicia. |
+
 ## Protocolo de control (HTTP, puerto 8080)
 
 | Ruta | Respuesta |

@@ -39,6 +39,8 @@ class SimuladorEquipo:
         self.lock = threading.Lock()
         self.rng = np.random.default_rng(42)
         self.servidor = None
+        self.sin_red_hasta = 0.0       # simula un corte del WiFi
+        self.retomado = False
 
     # ---------------------------------------------------------------- señal
     def muestra(self, k):
@@ -69,8 +71,9 @@ class SimuladorEquipo:
             with self.lock:
                 if self.grabando:
                     self.archivo.write(datos)
+                    self.archivo.flush()
                     self.bytes += len(datos)
-            if self.rng.random() >= self.perdida:
+            if self.rng.random() >= self.perdida and time.time() >= self.sin_red_hasta:
                 try:
                     s.sendto(datos, (self.destino, P.PUERTO_DATOS))
                 except OSError:
@@ -83,7 +86,7 @@ class SimuladorEquipo:
     # ---------------------------------------------------------------- control
     def estado(self):
         return {"equipo": "Simulador", "version": "1.0", "mac": "00:00:00:00:00:00",
-                "grabando": self.grabando, "sesion": self.sesion,
+                "grabando": self.grabando, "sesion": self.sesion, "retomado": self.retomado,
                 "segundos": round(time.time() - self.inicio_grab, 1) if self.grabando else 0.0,
                 "bytes": self.bytes, "secuencia": self.secuencia, "descartados": 0,
                 "bateria": 100, "libre_kb": 100000, "fs_hz": 100}
@@ -93,6 +96,8 @@ class SimuladorEquipo:
             if self.grabando:
                 return
             self.sesion = "".join(c for c in sesion if c.isalnum() or c in "_-")[:40] or "sesion"
+            for viejo in self.carpeta.glob(f"{self.sesion}_cont*.bin"):
+                viejo.unlink()
             self.archivo = open(self.carpeta / f"{self.sesion}.bin", "wb")
             self.bytes = 0
             self.inicio_grab = time.time()
@@ -103,6 +108,24 @@ class SimuladorEquipo:
             if self.grabando:
                 self.grabando = False
                 self.archivo.close()
+
+    # ---------------------------------------------------------------- fallas simuladas
+    def cortar_red(self, segundos):
+        """Ni datos ni control durante unos segundos (el equipo sigue grabando su respaldo)."""
+        self.sin_red_hasta = time.time() + segundos
+
+    def reiniciar(self):
+        """Como el firmware: la secuencia vuelve a 0 y, si estaba grabando, sigue en X_contN.bin."""
+        with self.lock:
+            self.secuencia = 0
+            self.retomado = False
+            if self.grabando:
+                self.archivo.close()
+                k = 1
+                while (self.carpeta / f"{self.sesion}_cont{k}.bin").exists():
+                    k += 1
+                self.archivo = open(self.carpeta / f"{self.sesion}_cont{k}.bin", "wb")
+                self.retomado = True
 
     def manejador(self):
         sim = self
@@ -120,6 +143,9 @@ class SimuladorEquipo:
                 self.wfile.write(b)
 
             def do_GET(self):
+                if time.time() < sim.sin_red_hasta:
+                    self.close_connection = True          # sin red: no responde
+                    return
                 u = urllib.parse.urlparse(self.path)
                 q = dict(urllib.parse.parse_qsl(u.query))
                 if u.path == "/estado":

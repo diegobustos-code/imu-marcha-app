@@ -11,6 +11,9 @@
 //   3. Se controla a distancia por HTTP (puerto 8080): iniciar, detener, estado y descargar.
 //   4. Mientras graba, guarda un respaldo en su memoria interna (LittleFS): los mismos paquetes,
 //      uno tras otro. Al terminar, la app de Windows lo descarga y rellena lo perdido por WiFi.
+//   5. Protecciones: el respaldo se asienta en la memoria cada segundo; si el equipo se reinicia
+//      mientras graba (batería, golpe), al encender sigue grabando en <sesion>_contN.bin, y la app
+//      de Windows une todos los archivos; si la memoria se llena, cierra el archivo sin corromperlo.
 //
 // Arduino IDE: paquete "esp32" de Espressif; para los Stick, además la biblioteca M5Unified.
 // Esquema de particiones: elegir uno con espacio para archivos (por ejemplo "8M with spiffs").
@@ -55,7 +58,11 @@ String   sesion = "";
 File     archivo;
 uint32_t bytesGrabados = 0;
 uint32_t inicioGrabacion = 0;
+uint32_t ultimoFlush = 0;
+bool     retomado = false;        // la grabación siguió después de un reinicio
+bool     memoriaLlena = false;
 String   nombreEquipo = "ESP32";
+const char* MARCA_GRABANDO = "/grabando.txt";   // existe mientras hay una grabación abierta
 
 // ---------------------------------------------------------------- lectura del sensor
 #ifdef EQUIPO_MPU6050
@@ -137,6 +144,8 @@ String estadoJson() {
   j += "\"mac\":\"" + WiFi.macAddress() + "\",";
   j += "\"grabando\":" + String(grabando ? "true" : "false") + ",";
   j += "\"sesion\":\"" + sesion + "\",";
+  j += "\"retomado\":" + String(retomado ? "true" : "false") + ",";
+  j += "\"memoria_llena\":" + String(memoriaLlena ? "true" : "false") + ",";
   j += "\"segundos\":" + String(grabando ? (millis() - inicioGrabacion) / 1000.0 : 0.0, 1) + ",";
   j += "\"bytes\":" + String(bytesGrabados) + ",";
   j += "\"secuencia\":" + String(secuenciaActual) + ",";
@@ -152,20 +161,61 @@ void responder(int codigo, const String& json) {
   servidor.send(codigo, "application/json", json);
 }
 
+void marcarGrabando(bool si) {
+  if (si) {
+    File f = LittleFS.open(MARCA_GRABANDO, FILE_WRITE);
+    if (f) { f.print(sesion); f.close(); }
+  } else {
+    LittleFS.remove(MARCA_GRABANDO);
+  }
+}
+
 void iniciarGrabacion(String nombre) {
   if (grabando) return;
   sesion = limpiar(nombre);
   if (sesion.length() == 0) sesion = "sesion_" + String(millis() / 1000);
+  // restos de una sesión anterior con el mismo nombre no deben mezclarse con esta
+  for (int k = 1; k < 100; k++) {
+    String c = "/" + sesion + "_cont" + String(k) + ".bin";
+    if (!LittleFS.exists(c)) break;
+    LittleFS.remove(c);
+  }
   archivo = LittleFS.open("/" + sesion + ".bin", FILE_WRITE);
   bytesGrabados = 0;
   inicioGrabacion = millis();
+  ultimoFlush = millis();
+  retomado = false;
+  memoriaLlena = false;
   grabando = (bool)archivo;
+  if (grabando) marcarGrabando(true);
 }
 
 void detenerGrabacion() {
   if (!grabando) return;
   grabando = false;
+  archivo.flush();
   archivo.close();
+  marcarGrabando(false);
+}
+
+// Si al encender existe la marca, el equipo se reinició mientras grababa: se sigue en un archivo nuevo.
+void retomarSiCorresponde() {
+  if (!LittleFS.exists(MARCA_GRABANDO)) return;
+  File f = LittleFS.open(MARCA_GRABANDO, FILE_READ);
+  String s = f ? f.readString() : "";
+  if (f) f.close();
+  s.trim();
+  if (s.length() == 0) { LittleFS.remove(MARCA_GRABANDO); return; }
+  sesion = limpiar(s);
+  int k = 1;
+  while (LittleFS.exists("/" + sesion + "_cont" + String(k) + ".bin") && k < 99) k++;
+  archivo = LittleFS.open("/" + sesion + "_cont" + String(k) + ".bin", FILE_WRITE);
+  bytesGrabados = 0;
+  inicioGrabacion = millis();
+  ultimoFlush = millis();
+  grabando = (bool)archivo;
+  retomado = grabando;
+  Serial.printf("Grabación retomada en %s_cont%d.bin\n", sesion.c_str(), k);
 }
 
 void configurarServidor() {
@@ -213,6 +263,7 @@ void configurarServidor() {
 // ---------------------------------------------------------------- red
 void iniciarRed() {
   WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
   if (strlen(RED_EXISTENTE) > 0) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(RED_EXISTENTE, CLAVE_EXISTENTE);
@@ -240,7 +291,7 @@ void mostrarPantalla() {
   d.setTextColor(TFT_WHITE);
   d.setCursor(4, 4);
   d.setTextSize(2);
-  d.println(grabando ? "GRABANDO" : "LISTO");
+  d.println(grabando ? (retomado ? "GRABANDO*" : "GRABANDO") : (memoriaLlena ? "MEMORIA LLENA" : "LISTO"));
   d.setTextSize(1);
   d.println();
   if (grabando) {
@@ -279,6 +330,7 @@ void setup() {
   escribirRegistro(0x1C, 0x08);      // ±4 g
 #endif
   if (!LittleFS.begin(true)) Serial.println("No se pudo montar LittleFS");
+  retomarSiCorresponde();
   iniciarRed();
   udp.begin(PUERTO_DATOS);
   configurarServidor();
@@ -298,8 +350,12 @@ void loop() {
     if (grabando) {
       size_t w = archivo.write((uint8_t*)&p, sizeof(p));
       bytesGrabados += w;
-      if (w != sizeof(p)) detenerGrabacion();          // memoria llena
+      if (w != sizeof(p)) { memoriaLlena = true; detenerGrabacion(); }   // memoria llena
     }
+  }
+  if (grabando && millis() - ultimoFlush > 1000) {      // asentar el respaldo cada segundo
+    archivo.flush();
+    ultimoFlush = millis();
   }
   servidor.handleClient();
 

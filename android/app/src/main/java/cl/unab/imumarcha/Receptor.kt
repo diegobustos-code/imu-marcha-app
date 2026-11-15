@@ -36,6 +36,7 @@ class Receptor(private val csv: Writer?, var eje: Int) : Thread("receptor") {
     private var desfase = 0.0
     private var anterior: DoubleArray? = null
     private var socket: DatagramSocket? = null
+    private var ultimoFlush = 0L
 
     override fun run() {
         try {
@@ -112,7 +113,11 @@ class Receptor(private val csv: Writer?, var eje: Int) : Thread("receptor") {
                 }
             }
         }
-        if (csv != null) try { csv.write(sb.toString()) } catch (e: Exception) { error = e.message }
+        if (csv != null) try {
+            csv.write(sb.toString())
+            val ahora = System.currentTimeMillis()
+            if (ahora - ultimoFlush > 1000) { csv.flush(); ultimoFlush = ahora }     // al disco cada segundo
+        } catch (e: Exception) { error = e.message }
     }
 
     /** Copia de la ventana de los últimos 10 s: tiempos y el eje elegido. */

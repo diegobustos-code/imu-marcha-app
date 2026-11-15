@@ -54,7 +54,9 @@ class MainActivity : Activity() {
     private var midiendo = false
 
     // emisor
-    private var emisor: Emisor? = null
+    private var emisor: Emisor?
+        get() = Global.emisor
+        set(v) { Global.emisor = v }
     private lateinit var txtEmisor: TextView
     private lateinit var btnEmisor: Button
     private lateinit var btnRespaldo: Button
@@ -62,7 +64,7 @@ class MainActivity : Activity() {
     private lateinit var edFrec: EditText
     private lateinit var edDestino: EditText
     private var inicioEmisor = 0L
-    private var control: Control? = null
+    private val control: Control? get() = Global.control
     private val carpetaRespaldo by lazy { java.io.File(getExternalFilesDir(null), "respaldo") }
 
     // receptor
@@ -123,13 +125,20 @@ class MainActivity : Activity() {
         mostrar(0)
         ui.postDelayed({ medirCompatibilidad() }, 600)
         ui.post(refresco)
-        control = Control({ emisor }, carpetaRespaldo).also { it.start() }
+        if (Global.control == null) Global.control = Control({ Global.emisor }, carpetaRespaldo).also { it.start() }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+        if (emisor != null) {                      // la ventana se volvió a abrir con el emisor activo
+            btnEmisor.text = "Detener emisor"; btnRespaldo.isEnabled = true; mostrar(1)
+        }
     }
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
-        emisor?.detener()
-        control?.detener()
+        // el emisor y el control siguen en el servicio aunque se cierre la ventana
+        if (isFinishing && emisor == null) { Global.control?.detener(); Global.control = null }
         detenerReceptor()
         super.onDestroy()
     }
@@ -317,6 +326,7 @@ class MainActivity : Activity() {
         val e = emisor
         if (e != null) {
             e.detener(); emisor = null
+            stopService(Intent(this, ServicioEmisor::class.java))
             btnEmisor.text = "Iniciar emisor"
             btnRespaldo.isEnabled = false
             txtEmisor.text = "Detenido. Paquetes enviados: ${e.enviados}"
@@ -328,6 +338,7 @@ class MainActivity : Activity() {
             val nuevo = Emisor(sm, dest, rbSimulada.isChecked, f, carpetaRespaldo, red)
             emisor = nuevo; inicioEmisor = System.currentTimeMillis()
             nuevo.start()
+            startForegroundService(Intent(this, ServicioEmisor::class.java))
             btnEmisor.text = "Detener emisor"
             btnRespaldo.isEnabled = true
         }
@@ -467,7 +478,7 @@ class MainActivity : Activity() {
     private val refresco = object : Runnable {
         override fun run() {
             emisor?.let { e ->
-                val s = (System.currentTimeMillis() - inicioEmisor) / 1000.0
+                val s = (System.currentTimeMillis() - e.creado) / 1000.0
                 val tasa = if (s > 0) e.enviados * Paquete.POR_PAQUETE / s else 0.0
                 val ip = datosWifi()?.second ?: "sin WiFi"
                 val resp = if (e.grabando) String.format(Locale.US, "GRABANDO respaldo «%s» · %.0f s · %d kB",
