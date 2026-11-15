@@ -30,6 +30,7 @@ cualquiera de las IMU al mismo tiempo, y los distingue por su dirección IP.
 | La IMU se reinicia mientras graba | El respaldo se asienta cada segundo; al encender, la IMU sigue grabando en `<sesion>_contN.bin` y el PC une los tramos. |
 | La memoria de la IMU se llena | Cierra el archivo sin corromperlo y lo informa (`memoria_llena`). |
 | El celular apaga la pantalla | El emisor corre como servicio en primer plano y el respaldo se asienta cada segundo. |
+| Se empezó mal una pasada | El botón **Descartar** detiene el registro en curso (o toma la última sesión), borra los respaldos en los equipos y mueve la carpeta a `descartadas\`, sin borrarla del todo. |
 | Durante el registro | Alertas visibles y sonoras si un equipo deja de enviar más de 3 s, baja del 15 % de batería, se queda sin memoria, deja de grabar o se reinicia. |
 
 ## Protocolo de control (HTTP, puerto 8080)
@@ -42,6 +43,24 @@ cualquiera de las IMU al mismo tiempo, y los distingue por su dirección IP.
 | `/archivos` | Lista de respaldos |
 | `/archivo?n=P01_normal_1.bin` | Descarga un respaldo (mismos paquetes de 164 bytes, uno tras otro) |
 | `/borrar?n=...` | Borra un respaldo |
+| `/emisor/iniciar`, `/emisor/detener` | Solo el celular: enciende o apaga el envío de datos desde el PC |
+
+### Celular en modo remoto
+
+En la pestaña Emisor, **Modo remoto** deja el celular esperando: avisa a la red cada segundo (paquete
+`IMUM` en el puerto 5005) y la app de Windows lo enciende sola al iniciar el registro. Así el celular
+puede ir sujeto en la zona lumbar sin tocarlo durante la sesión.
+
+### Error de socket en Windows (WinError 10013)
+
+Significa que otro programa ocupa el puerto 5005. La app lo diagnostica y muestra qué programa es. Si es
+el servicio de uso compartido de Windows Media Player (`wmpnetwk.exe`), se detiene desde PowerShell como
+administrador:
+
+```
+sc.exe stop WMPNetworkSvc
+sc.exe config WMPNetworkSvc start= disabled
+```
 
 ## Datos en el PC
 
