@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -24,3 +27,12 @@ jobs:
         with:
           name: IMU_Marcha
           path: IMU_Marcha.apk
+      - name: Publicar en Releases
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: IMU Marcha (versión ${{ github.run_number }})
+          body: APK compilada automáticamente desde ${{ github.sha }}. Descárgala desde el teléfono e instálala.
+          files: IMU_Marcha.apk
+          make_latest: true
