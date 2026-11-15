@@ -21,7 +21,7 @@ from . import protocolo as P
 
 class SimuladorEquipo:
     def __init__(self, frecuencia=1.9, perdida=0.0, destino="127.0.0.1", saltos=True,
-                 carpeta=None, puerto_control=P.PUERTO_CONTROL):
+                 carpeta=None, puerto_control=P.PUERTO_CONTROL, remoto=False):
         self.frecuencia = frecuencia
         self.perdida = perdida
         self.destino = destino
@@ -40,6 +40,8 @@ class SimuladorEquipo:
         self.rng = np.random.default_rng(42)
         self.servidor = None
         self.sin_red_hasta = 0.0       # simula un corte del WiFi
+        self.remoto = remoto           # como el celular en modo remoto: espera a que el PC lo encienda
+        self.emitiendo = not remoto
         self.retomado = False
 
     # ---------------------------------------------------------------- señal
@@ -73,7 +75,13 @@ class SimuladorEquipo:
                     self.archivo.write(datos)
                     self.archivo.flush()
                     self.bytes += len(datos)
-            if self.rng.random() >= self.perdida and time.time() >= self.sin_red_hasta:
+            if self.remoto and k % P.FS == 0 and time.time() >= self.sin_red_hasta:
+                aviso = {"equipo": "Simulador", "modo": "emitiendo" if self.emitiendo else "espera", "control": 8080}
+                try:
+                    s.sendto(b"IMUM" + json.dumps(aviso).encode(), (self.destino, P.PUERTO_DATOS))
+                except OSError:
+                    pass
+            if self.emitiendo and self.rng.random() >= self.perdida and time.time() >= self.sin_red_hasta:
                 try:
                     s.sendto(datos, (self.destino, P.PUERTO_DATOS))
                 except OSError:
@@ -152,6 +160,12 @@ class SimuladorEquipo:
                     self.enviar(200, sim.estado())
                 elif u.path == "/inicio":
                     sim.iniciar_grabacion(q.get("sesion", ""))
+                    self.enviar(200, sim.estado())
+                elif u.path == "/emisor/iniciar":
+                    sim.emitiendo = True
+                    self.enviar(200, sim.estado())
+                elif u.path == "/emisor/detener":
+                    sim.emitiendo = False
                     self.enviar(200, sim.estado())
                 elif u.path == "/fin":
                     sim.detener_grabacion()

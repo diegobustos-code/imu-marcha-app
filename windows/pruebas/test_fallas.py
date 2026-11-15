@@ -96,3 +96,28 @@ def test_reinicio_del_equipo(tmp_path):
     assert e["tramos_respaldo"] == 2
     assert (reg.carpeta / "respaldo_Simulador_cont1.bin").exists()
     assert set(df.columns) == {"t_s", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps"}
+
+
+def test_celular_en_modo_remoto_y_descartar(tmp_path):
+    """Un equipo en espera avisa a la red; el PC lo enciende solo, graba y luego descarta la sesión."""
+    sim = SimuladorEquipo(frecuencia=1.9, perdida=0.0, carpeta=tmp_path / "eq", remoto=True).iniciar()
+    rx = Receptor(); rx.start()
+    try:
+        for _ in range(80):
+            time.sleep(0.1)
+            if rx.lista() and rx.lista()[0].activo():
+                break
+        eq = rx.lista()[0]
+        assert eq.activo() and eq.encendido_por_pc and sim.emitiendo
+        reg = Registro([eq], tmp_path / "d", "P03", "normal", 1)
+        reg.iniciar(); time.sleep(3)
+        destino = reg.descartar()
+        assert destino is not None and destino.parent.name == "_descartadas"
+        assert not reg.carpeta.exists() and not sim.grabando
+        assert not list((tmp_path / "eq").glob("P03_normal_1*.bin"))       # memoria del equipo liberada
+        rx.apagar_encendidos()
+        time.sleep(0.5)
+        assert not sim.emitiendo
+    finally:
+        rx.activo = False
+        sim.detener()

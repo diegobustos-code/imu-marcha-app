@@ -108,6 +108,12 @@ class PestanaRegistro(QtWidgets.QWidget):
         fila.addWidget(self.btn_sim)
         fila.addStretch()
         v.addLayout(fila)
+        self.chk_encender = QtWidgets.QCheckBox("Encender solos los celulares en modo remoto")
+        self.chk_encender.setChecked(True)
+        self.chk_encender.setToolTip("Si un celular con la app en «modo remoto» aparece en la red, el PC enciende su envío "
+                                     "de datos sin que haya que tocar el teléfono.")
+        self.chk_encender.toggled.connect(lambda v: setattr(self.rx, "encender_solos", v))
+        v.addWidget(self.chk_encender)
         self.lbl_sinc = QtWidgets.QLabel("Esperando equipos… Conecta el PC a la red IMU-Marcha o inicia el simulador.")
         self.lbl_sinc.setWordWrap(True)
         v.addWidget(self.lbl_sinc)
@@ -143,7 +149,17 @@ class PestanaRegistro(QtWidgets.QWidget):
         self.btn.setIconSize(QtCore.QSize(22, 22))
         self.btn.setMinimumHeight(54)
         self.btn.clicked.connect(self.alternar)
-        izq.addWidget(self.btn)
+        fila_b = QtWidgets.QHBoxLayout()
+        fila_b.addWidget(self.btn, 1)
+        self.btn_descartar = QtWidgets.QPushButton(E.icono("detener", E.ROJO), " Descartar")
+        self.btn_descartar.setMinimumHeight(54)
+        self.btn_descartar.setToolTip("Descarta el registro en curso o la última sesión guardada (por ejemplo, si hubo un "
+                                      "error al inicio). No se borra: pasa a la carpeta _descartadas.")
+        self.btn_descartar.clicked.connect(self.descartar)
+        self.btn_descartar.setEnabled(False)
+        fila_b.addWidget(self.btn_descartar)
+        izq.addLayout(fila_b)
+        self.ultima_sesion = None
         self.lbl_tiempo = QtWidgets.QLabel("Listo.")
         izq.addWidget(self.lbl_tiempo)
         self.lbl_alerta = QtWidgets.QLabel()
@@ -244,6 +260,8 @@ class PestanaRegistro(QtWidgets.QWidget):
             bat = eq.estado.get("bateria", -1) if eq.estado else -1
             if eq.grabando:
                 est = f"● GRABANDO ({eq.rec_recibidos} paq.)"
+            elif eq.en_espera():
+                est = "en espera: encendiendo…" if self.rx.encender_solos else "en espera (modo remoto)"
             elif not eq.activo():
                 est = "sin datos"
             else:
@@ -465,6 +483,8 @@ class PestanaRegistro(QtWidgets.QWidget):
                 self.escribir(m)
             self.escribir(f"Registro iniciado: {self.registro.sesion} con {', '.join(e.nombre for e in eqs)}. "
                           "Recuerda la marca de sincronización (un salto, o 5 s de pie quieto en adultos mayores).")
+            self.btn_descartar.setEnabled(True)
+            self.btn_descartar.setText(" Descartar")
             self.btn.setText("  Detener registro")
             self.btn.setIcon(E.icono("detener", "white"))
             self.btn.setObjectName("detener"); self.btn.style().unpolish(self.btn); self.btn.style().polish(self.btn)
@@ -481,6 +501,43 @@ class PestanaRegistro(QtWidgets.QWidget):
             self.trabajo.listo.connect(self.registro_terminado)
             self.trabajo.fallo.connect(lambda e: (self.escribir("Error al guardar:\n" + e), self.registro_terminado(None)))
             self.trabajo.start()
+
+    def descartar(self):
+        if self.registro is not None:
+            r = QtWidgets.QMessageBox.question(
+                self, "Descartar el registro en curso",
+                f"¿Descartar {self.registro.sesion}?\n\nSe detiene la grabación en los equipos, se borra su respaldo de "
+                "esta sesión y lo guardado en el PC pasa a la carpeta _descartadas. La repetición no avanza, así que "
+                "puedes volver a grabarla de inmediato.")
+            if r != QtWidgets.QMessageBox.Yes:
+                return
+            reg = self.registro
+            destino = reg.descartar()
+            self.registro = None
+            self.alertas_vistas.clear(); self.lbl_alerta.hide()
+            self.btn.setText("  Iniciar registro"); self.btn.setIcon(E.icono("registro", "white"))
+            self.btn.setObjectName("principal"); self.btn.style().unpolish(self.btn); self.btn.style().polish(self.btn)
+            self.lbl_tiempo.setText(f"Descartado: {reg.sesion}")
+            self.escribir(f"Registro {reg.sesion} descartado" + (f" (movido a {destino})." if destino else "."))
+            self.btn_descartar.setEnabled(False)
+            self.actualizar_nombre()
+            return
+        if self.ultima_sesion is None:
+            return
+        carpeta = self.ultima_sesion
+        r = QtWidgets.QMessageBox.question(
+            self, "Descartar la última sesión",
+            f"¿Descartar la sesión guardada {carpeta.name}?\n\nPasa a la carpeta _descartadas y se libera la memoria del "
+            "equipo. La repetición vuelve atrás para grabarla de nuevo.")
+        if r != QtWidgets.QMessageBox.Yes:
+            return
+        destino = RG.descartar_sesion(carpeta, self.ed_base.text())
+        self.escribir(f"Sesión {carpeta.name} descartada" + (f" (movida a {destino})." if destino else "."))
+        self.ultima_sesion = None
+        self.btn_descartar.setEnabled(False)
+        self.sp_rep.setValue(max(1, self.sp_rep.value() - 1))
+        self.actualizar_pendientes()
+        self.actualizar_nombre()
 
     def registro_terminado(self, meta):
         self.registro = None
@@ -502,6 +559,9 @@ class PestanaRegistro(QtWidgets.QWidget):
                     self.escribir(f"   reloj: inicio {rl['inicio_pc_hora']} (±{rl['incertidumbre_ms']:.0f} ms), "
                                   f"deriva {rl['deriva_ppm']:+.0f} ppm")
             self.escribir(f"Sesión guardada en {carpeta_sesion(self.ed_base.text(), meta['participante'], meta['sesion'])}")
+            self.ultima_sesion = carpeta_sesion(self.ed_base.text(), meta['participante'], meta['sesion'])
+            self.btn_descartar.setEnabled(True)
+            self.btn_descartar.setText(" Descartar la última")
             if meta.get("pendientes"):
                 self.escribir("⚠ Quedaron respaldos pendientes; se descargarán solos cuando el equipo vuelva a la red.")
             self.actualizar_pendientes()
@@ -1057,7 +1117,7 @@ class Ventana(QtWidgets.QMainWindow):
             self.p_red.fijar("Puerto 5005 bloqueado", "rojo")
         else:
             self.p_red.fijar("Recepción activa", "verde")
-        activos = [e for e in self.rx.lista() if e.activo()]
+        activos = [e for e in self.rx.lista() if e.visible()]
         listos = [e for e in activos if e.listo()[0]]
         if not activos:
             self.p_eqs.fijar("Sin equipos", "gris")
@@ -1076,6 +1136,7 @@ class Ventana(QtWidgets.QMainWindow):
             self.p_reg.registro.detener()
         if self.p_reg.simulador:
             self.p_reg.simulador.detener()
+        self.rx.apagar_encendidos()
         self.rx.activo = False
         e.accept()
 

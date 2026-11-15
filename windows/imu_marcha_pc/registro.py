@@ -69,6 +69,10 @@ class Equipo:
         self.buf_v = collections.deque(maxlen=self.VENTANA)
         self.lock = threading.Lock()
         self.sinc = R.Sincronizador()
+        self.ult_faro = 0.0          # último aviso "estoy disponible" (celular en modo remoto)
+        self.faro = {}
+        self.encendido_por_pc = False
+        self._ult_encendido = 0.0
         self.recientes = collections.deque()   # (t_pc, secuencia) de los últimos 10 s
         self._sinc_cache = (0.0, None)
         # registro en curso
@@ -124,6 +128,13 @@ class Equipo:
     def activo(self):
         return time.time() - self.ultimo_paquete < 2.0
 
+    def visible(self):
+        """Envía datos o, al menos, avisa que está disponible (modo remoto)."""
+        return self.activo() or time.time() - self.ult_faro < 3.5
+
+    def en_espera(self):
+        return not self.activo() and time.time() - self.ult_faro < 3.5
+
     def sincronia(self):
         """Estimación del reloj (se recalcula como máximo una vez por segundo)."""
         ahora = time.time()
@@ -148,6 +159,8 @@ class Equipo:
     def listo(self):
         """(listo, lista de motivos) para empezar un registro."""
         motivos = []
+        if self.en_espera():
+            return False, ["en espera: el PC lo está encendiendo…"]
         if not self.activo():
             return False, ["no llegan datos"]
         if self.control is False:
@@ -181,6 +194,7 @@ class Receptor(threading.Thread):
 
     def __init__(self):
         super().__init__(daemon=True)
+        self.encender_solos = True    # enciende a distancia los celulares en modo remoto
         self.equipos = {}
         self.lock = threading.Lock()
         self.error = None
@@ -213,6 +227,9 @@ class Receptor(threading.Thread):
                 continue
             except OSError:
                 continue
+            if datos[:4] == b"IMUM":
+                self.faro(ip, datos[4:])
+                continue
             d = P.decodificar(datos)
             if d is None:
                 continue
@@ -223,6 +240,42 @@ class Receptor(threading.Thread):
                     threading.Thread(target=self.identificar, args=(eq,), daemon=True).start()
             eq.recibir(d[0], d[1], time.time(), datos)
         s.close()
+
+    def faro(self, ip, cuerpo):
+        """Aviso de un celular en modo remoto: se muestra en la tabla y, si está en espera, se enciende."""
+        try:
+            info = json.loads(cuerpo.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        with self.lock:
+            eq = self.equipos.get(ip)
+            if eq is None:
+                eq = self.equipos[ip] = Equipo(ip)
+        eq.ult_faro = time.time()
+        eq.faro = info
+        eq.nombre = info.get("equipo", eq.nombre)
+        eq.control = True
+        if (self.encender_solos and info.get("modo") == "espera" and not eq.activo()
+                and time.time() - eq._ult_encendido > 5):
+            eq._ult_encendido = time.time()
+            threading.Thread(target=self.encender, args=(eq,), daemon=True).start()
+
+    def encender(self, eq):
+        try:
+            eq.estado = pedir(eq.ip, "/emisor/iniciar", timeout=3)
+            eq.encendido_por_pc = True
+            eq.mac = eq.estado.get("mac", eq.mac)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def apagar_encendidos(self):
+        """Al cerrar la app: apaga el envío de los celulares que encendió el PC."""
+        for eq in self.lista():
+            if eq.encendido_por_pc and not eq.grabando:
+                try:
+                    pedir(eq.ip, "/emisor/detener", timeout=1.5)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def identificar(self, eq):
         try:
@@ -511,6 +564,36 @@ def recuperar_sesion(carpeta, progreso=lambda t: None):
     return finalizar(carpeta, meta["equipos_info"], meta, mensajes, progreso, recuperada=True)
 
 
+def mover_a_descartadas(carpeta, base):
+    """No se borra nada de forma definitiva: la sesión pasa a <base>/_descartadas/ con la fecha y hora."""
+    carpeta, base = Path(carpeta), Path(base)
+    if not carpeta.exists():
+        return None
+    destino = base / "_descartadas" / f"{carpeta.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(carpeta, destino)
+    guardar_pendientes(base, [p for p in leer_pendientes(base) if Path(p["carpeta"]) != carpeta])
+    return destino
+
+
+def borrar_respaldo_en_equipo(ip, sesion):
+    """Borra de la memoria del equipo los archivos de una sesión descartada (si responde)."""
+    try:
+        for nombre, _ in archivos_de_sesion(pedir(ip, "/archivos", timeout=3), sesion):
+            pedir(ip, "/borrar?n=" + urllib.parse.quote(nombre), timeout=3)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def descartar_sesion(carpeta, base):
+    """Descarta una sesión ya guardada: la mueve a _descartadas y libera la memoria de los equipos."""
+    meta = leer_json(Path(carpeta) / "sesion.json", {}) or {}
+    for e in meta.get("equipos", []):
+        if e.get("con_respaldo") or e.get("ip"):
+            borrar_respaldo_en_equipo(e["ip"], meta.get("sesion", Path(carpeta).name))
+    return mover_a_descartadas(carpeta, base)
+
+
 class Registro:
     """Inicia, detiene y guarda una sesión con todos los equipos elegidos.
 
@@ -555,6 +638,28 @@ class Registro:
                     pedir_reintentando(eq.ip, "/inicio?sesion=" + urllib.parse.quote(self.sesion), intentos=3, timeout=2)
                 except Exception as e:  # noqa: BLE001
                     self.mensajes.append(f"{eq.nombre}: no respondió a /inicio ({e}); se guarda solo lo recibido.")
+
+    def _cerrar_diarios(self):
+        for eq in self.equipos:
+            with eq.lock:
+                eq.grabando = False
+                if eq.diario is not None:
+                    eq.diario.close()
+                    eq.diario = None
+
+    def descartar(self):
+        """Cancela el registro en curso (por ejemplo, si algo salió mal al inicio): detiene la grabación en
+        los equipos, borra su respaldo de esta sesión y mueve lo guardado a _descartadas."""
+        self._cerrar_diarios()
+        for info in self.infos:
+            if info.get("control"):
+                try:
+                    pedir_reintentando(info["ip"], "/fin", intentos=2, timeout=2)
+                except Exception:  # noqa: BLE001
+                    pass
+                borrar_respaldo_en_equipo(info["ip"], self.sesion)
+        (self.carpeta / "en_curso.json").unlink(missing_ok=True)
+        return mover_a_descartadas(self.carpeta, self.base)
 
     def detener(self, progreso=lambda txt: None):
         fin = datetime.now()
