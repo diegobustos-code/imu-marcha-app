@@ -186,14 +186,25 @@ class Receptor(threading.Thread):
         self.error = None
         self.activo = True
 
-    def run(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def abrir(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if os.name != "nt":
+            # En Windows SO_REUSEADDR deja que otro programa "robe" el puerto; ahí no se usa.
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("", P.PUERTO_DATOS))
-            s.settimeout(0.5)
-        except OSError as e:
-            self.error = f"No se pudo abrir el puerto {P.PUERTO_DATOS}: {e}"
+        s.bind(("", P.PUERTO_DATOS))
+        s.settimeout(0.5)
+        return s
+
+    def run(self):
+        s = None
+        while self.activo and s is None:          # si el puerto está bloqueado, se reintenta cada 3 s
+            try:
+                s = self.abrir()
+                self.error = None
+            except OSError as e:
+                self.error = f"No se pudo abrir el puerto {P.PUERTO_DATOS}: {e}"
+                time.sleep(3)
+        if s is None:
             return
         while self.activo:
             try:

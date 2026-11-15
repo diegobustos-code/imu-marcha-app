@@ -15,6 +15,8 @@ from . import __version__
 from . import analisis as A
 from . import protocolo as P
 from . import reloj as R
+from . import estilo as E
+from . import red as RED
 from . import registro as RG
 from .registro import Receptor, Registro, carpeta_sesion, nombre_sesion, pedir
 
@@ -74,23 +76,39 @@ class PestanaRegistro(QtWidgets.QWidget):
         cfg = configuracion()
 
         izq = QtWidgets.QVBoxLayout()
-        caja = QtWidgets.QGroupBox("Equipos que están enviando datos (puerto 5005)")
+        # aviso cuando Windows no deja abrir el puerto
+        self.aviso_red = QtWidgets.QFrame(); self.aviso_red.setObjectName("aviso")
+        av = QtWidgets.QVBoxLayout(self.aviso_red)
+        self.lbl_aviso_red = QtWidgets.QLabel(); self.lbl_aviso_red.setWordWrap(True)
+        self.lbl_aviso_red.setStyleSheet("color:white;")
+        av.addWidget(self.lbl_aviso_red)
+        fila_av = QtWidgets.QHBoxLayout()
+        b_diag = QtWidgets.QPushButton(E.icono("diagnostico", "white"), " Ver causa y solución")
+        b_diag.setStyleSheet("color:white;"); b_diag.clicked.connect(self.diagnosticar_red)
+        fila_av.addWidget(b_diag); fila_av.addStretch()
+        av.addLayout(fila_av)
+        self.aviso_red.hide()
+        izq.addWidget(self.aviso_red)
+        caja = QtWidgets.QGroupBox("Equipos conectados")
         v = QtWidgets.QVBoxLayout(caja)
-        self.tabla = QtWidgets.QTableWidget(0, 8)
-        self.tabla.setHorizontalHeaderLabels(["Usar", "Equipo", "IP", "Paquetes / perdidos", "Batería",
-                                              "Sincronía", "Listo", "Estado"])
-        self.tabla.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        self.tabla.horizontalHeader().setStretchLastSection(True)
+        self.tabla = QtWidgets.QTableWidget(0, 6)
+        self.tabla.setHorizontalHeaderLabels(["Usar", "Equipo", "Batería", "Sincronía", "Listo", "Estado"])
+        self.tabla.setMinimumHeight(130)
+        cab = self.tabla.horizontalHeader()
+        for col, modo in enumerate([QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.Stretch,
+                                    QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.ResizeToContents,
+                                    QtWidgets.QHeaderView.Stretch, QtWidgets.QHeaderView.Stretch]):
+            cab.setSectionResizeMode(col, modo)
         self.tabla.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tabla.verticalHeader().setVisible(False)
         v.addWidget(self.tabla)
         fila = QtWidgets.QHBoxLayout()
-        self.btn_sim = QtWidgets.QPushButton("Iniciar simulador (prueba sin equipo)")
+        self.btn_sim = QtWidgets.QPushButton(E.icono("onda"), " Iniciar simulador (prueba sin equipo)")
         self.btn_sim.clicked.connect(self.alternar_simulador)
         fila.addWidget(self.btn_sim)
         fila.addStretch()
         v.addLayout(fila)
-        self.lbl_sinc = QtWidgets.QLabel("Esperando equipos…")
+        self.lbl_sinc = QtWidgets.QLabel("Esperando equipos… Conecta el PC a la red IMU-Marcha o inicia el simulador.")
         self.lbl_sinc.setWordWrap(True)
         v.addWidget(self.lbl_sinc)
         izq.addWidget(caja)
@@ -98,7 +116,8 @@ class PestanaRegistro(QtWidgets.QWidget):
         datos = QtWidgets.QGroupBox("Sesión")
         f = QtWidgets.QFormLayout(datos)
         self.ed_base = QtWidgets.QLineEdit(cfg.value("carpeta", CARPETA_POR_DEFECTO))
-        b = QtWidgets.QPushButton("Cambiar…")
+        b = QtWidgets.QPushButton(E.icono("carpeta"), "")
+        b.setToolTip("Cambiar la carpeta de datos")
         b.clicked.connect(self.elegir_carpeta)
         h = QtWidgets.QHBoxLayout(); h.addWidget(self.ed_base); h.addWidget(b)
         f.addRow("Carpeta de datos:", h)
@@ -119,9 +138,10 @@ class PestanaRegistro(QtWidgets.QWidget):
         self.sp_rep.valueChanged.connect(self.actualizar_nombre)
         izq.addWidget(datos)
 
-        self.btn = QtWidgets.QPushButton("▶  Iniciar registro")
+        self.btn = QtWidgets.QPushButton(E.icono("registro", "white"), "  Iniciar registro")
+        self.btn.setObjectName("principal")
+        self.btn.setIconSize(QtCore.QSize(22, 22))
         self.btn.setMinimumHeight(54)
-        fuente = self.btn.font(); fuente.setPointSize(13); fuente.setBold(True); self.btn.setFont(fuente)
         self.btn.clicked.connect(self.alternar)
         izq.addWidget(self.btn)
         self.lbl_tiempo = QtWidgets.QLabel("Listo.")
@@ -133,7 +153,7 @@ class PestanaRegistro(QtWidgets.QWidget):
         izq.addWidget(self.lbl_alerta)
         fila_p = QtWidgets.QHBoxLayout()
         self.lbl_pend = QtWidgets.QLabel()
-        self.btn_recuperar = QtWidgets.QPushButton("Recuperar respaldos…")
+        self.btn_recuperar = QtWidgets.QPushButton(E.icono("descargar"), " Recuperar respaldos…")
         self.btn_recuperar.clicked.connect(self.dialogo_respaldos)
         fila_p.addWidget(self.lbl_pend, 1); fila_p.addWidget(self.btn_recuperar)
         izq.addLayout(fila_p)
@@ -150,7 +170,11 @@ class PestanaRegistro(QtWidgets.QWidget):
         self.c_esp = self.g_esp.plot(pen=pg.mkPen(AZUL, width=1.5))
         self.l_fd = pg.InfiniteLine(angle=90, pen=pg.mkPen(NARANJA, width=1.5))
         self.g_esp.addItem(self.l_fd)
+        self.l_fd.hide()
         self.lbl_fd = QtWidgets.QLabel(); f2 = self.lbl_fd.font(); f2.setPointSize(12); self.lbl_fd.setFont(f2)
+        self.vacio = pg.TextItem("Sin datos todavía.\nConecta el PC a la red IMU-Marcha\no presiona «Iniciar simulador».",
+                                 color=E.color_suave(), anchor=(0.5, 0.5))
+        self.g_senal.addItem(self.vacio); self.vacio.setPos(0.5, 0.5)
         der.addWidget(self.g_senal, 1); der.addWidget(self.g_esp, 1); der.addWidget(self.lbl_fd)
 
         raiz = QtWidgets.QHBoxLayout(self)
@@ -179,7 +203,7 @@ class PestanaRegistro(QtWidgets.QWidget):
         s = nombre_sesion(self.ed_part.text(), self.cb_cond.currentText(), self.sp_rep.value())
         ruta = carpeta_sesion(self.ed_base.text(), self.ed_part.text(), s)
         self.lbl_sesion.setText(str(ruta))
-        self.lbl_sesion.setStyleSheet("color:#B00;" if ruta.exists() else "")
+        self.lbl_sesion.setStyleSheet(f"color:{E.ROJO};" if ruta.exists() else "")
         self.lbl_sesion.setToolTip("Ya existe: sube la repetición para no sobrescribir" if ruta.exists() else "")
 
     def alternar_simulador(self):
@@ -201,7 +225,11 @@ class PestanaRegistro(QtWidgets.QWidget):
 
     def refrescar(self):
         if self.rx.error:
-            self.lbl_fd.setText(self.rx.error)
+            self.lbl_aviso_red.setText("<b>No se pueden recibir datos.</b> Windows no dejó abrir el puerto 5005 "
+                                       "(por eso la tabla está vacía). La app vuelve a intentarlo sola cada 3 s.")
+            self.aviso_red.show()
+        else:
+            self.aviso_red.hide()
         lista = self.rx.lista()
         if self.tabla.rowCount() != len(lista):
             self.tabla.setRowCount(len(lista))
@@ -224,21 +252,22 @@ class PestanaRegistro(QtWidgets.QWidget):
             txt_sinc, nivel = R.estado_texto(sinc) if eq.activo() else ("—", "pendiente")
             listo, motivos = eq.listo()
             hz, perd = eq.ritmo()
-            vals = [eq.nombre, eq.ip, f"{eq.recibidos} / {eq.perdidos} ({pct:.1f} %)",
-                    f"{bat} %" if bat is not None and bat >= 0 else "—", txt_sinc,
+            vals = [eq.nombre, f"{bat} %" if bat is not None and bat >= 0 else "—", txt_sinc,
                     "✔ listo" if listo else "✘ " + motivos[0], est]
-            colores = {5: {"bueno": "#1a7f37", "aceptable": "#B8860B", "malo": "#B00", "pendiente": "#777"}[nivel],
-                       6: "#1a7f37" if listo else "#B00", 7: "#B00" if eq.grabando else "#222"}
+            texto = E.color_texto()
+            colores = {3: {"bueno": E.VERDE, "aceptable": E.AMBAR, "malo": E.ROJO, "pendiente": E.color_suave()}[nivel],
+                       4: E.VERDE if listo else E.ROJO, 5: E.ROJO if eq.grabando else texto}
             for j, txt in enumerate(vals, start=1):
                 it = self.tabla.item(i, j)
                 if it is None:
                     it = QtWidgets.QTableWidgetItem(); self.tabla.setItem(i, j, it)
                 it.setText(str(txt))
-                it.setForeground(QtGui.QColor(colores.get(j, "#222")))
-            self.tabla.item(i, 6).setToolTip("\n".join(motivos) if motivos else
+                it.setForeground(QtGui.QColor(colores.get(j, texto)))
+            self.tabla.item(i, 1).setToolTip(f"IP {eq.ip}\nPaquetes recibidos {eq.recibidos}, perdidos {eq.perdidos} ({pct:.1f} %)")
+            self.tabla.item(i, 4).setToolTip("\n".join(motivos) if motivos else
                                              f"{hz:.0f} muestras/s, {perd:.1f} % perdidos, control remoto OK")
             if sinc:
-                self.tabla.item(i, 5).setToolTip(
+                self.tabla.item(i, 3).setToolTip(
                     f"Desfase con el reloj del PC estimado en {sinc['ventanas']} ventanas de 2 s\n"
                     f"Deriva del reloj del equipo: {sinc['deriva_ppm']:+.0f} ppm")
         # sincronía entre equipos
@@ -249,14 +278,14 @@ class PestanaRegistro(QtWidgets.QWidget):
         elif len(ok) < len(sincronizados):
             self.lbl_sinc.setText(f"Sincronizando relojes: {len(ok)} de {len(sincronizados)} equipos listos "
                                   "(se necesitan unos 10 s de datos).")
-            self.lbl_sinc.setStyleSheet("color:#777;")
+            self.lbl_sinc.setStyleSheet(f"color:{E.color_suave()};")
         elif len(ok) == 1:
-            self.lbl_sinc.setText(f"Reloj sincronizado con el PC (±{ok[0][1]['incertidumbre_ms']:.0f} ms).")
-            self.lbl_sinc.setStyleSheet("color:#1a7f37;")
+            self.lbl_sinc.setText(f"Reloj sincronizado con el PC (±{max(1, round(ok[0][1]['incertidumbre_ms']))} ms).")
+            self.lbl_sinc.setStyleSheet(f"color:{E.VERDE};")
         else:
             entre = sorted(r["incertidumbre_ms"] for _, r in ok)[-2:]
             total = sum(entre)
-            color = "#1a7f37" if total <= 2 * R.UMBRAL_BUENO_MS else ("#B8860B" if total <= 2 * R.UMBRAL_ACEPTABLE_MS else "#B00")
+            color = E.VERDE if total <= 2 * R.UMBRAL_BUENO_MS else (E.AMBAR if total <= 2 * R.UMBRAL_ACEPTABLE_MS else E.ROJO)
             self.lbl_sinc.setText(f"✔ {len(ok)} equipos sincronizados entre sí con el reloj del PC "
                                   f"(diferencia máxima estimada ±{total:.0f} ms).")
             self.lbl_sinc.setStyleSheet(f"color:{color};")
@@ -275,6 +304,7 @@ class PestanaRegistro(QtWidgets.QWidget):
                 eje = int(np.argmax(np.abs(vals[:, :3].mean(axis=0))))
                 v = vals[:, eje]
                 self.lbl_graf.setText(f"{eq.nombre} · eje vertical {'xyz'[eje]} (últimos 10 s)")
+                self.vacio.hide()
                 self.c_senal.setData(t, v)
                 if len(t) >= 4 * P.FS:
                     tg = np.arange(t[0], t[-1], 1 / P.FS)
@@ -284,7 +314,7 @@ class PestanaRegistro(QtWidgets.QWidget):
                     m = f <= 4
                     self.c_esp.setData(f[m], p[m])
                     fd = A.espectro(vg, P.FS)[0]
-                    self.l_fd.setValue(fd)
+                    self.l_fd.setValue(fd); self.l_fd.show()
                     self.lbl_fd.setText(f"Frecuencia dominante: {fd:.2f} Hz ({fd * 60:.0f} pasos/min)")
         if self.registro:
             seg = time.time() - self.inicio
@@ -330,7 +360,7 @@ class PestanaRegistro(QtWidgets.QWidget):
         n = len(RG.leer_pendientes(self.ed_base.text()))
         self.lbl_pend.setText(f"Respaldos pendientes: {n} (se bajan solos cuando el equipo vuelve)" if n else
                               "Sin respaldos pendientes.")
-        self.lbl_pend.setStyleSheet("color:#B8860B;" if n else "color:#777;")
+        self.lbl_pend.setStyleSheet(f"color:{E.AMBAR};" if n else f"color:{E.color_suave()};")
 
     def revisar_pendientes(self):
         self.actualizar_pendientes()
@@ -372,6 +402,21 @@ class PestanaRegistro(QtWidgets.QWidget):
     def dialogo_respaldos(self):
         DialogoRespaldos(self, self.rx, self.ed_base.text()).exec()
         self.actualizar_pendientes()
+
+    def diagnosticar_red(self):
+        causa, texto = RED.diagnosticar(P.PUERTO_DATOS)
+        caja = QtWidgets.QMessageBox(self)
+        caja.setWindowTitle("Puerto 5005 bloqueado")
+        caja.setIcon(QtWidgets.QMessageBox.Warning)
+        caja.setText(texto)
+        if causa == "reservado":
+            copiar = caja.addButton("Copiar comandos", QtWidgets.QMessageBox.ActionRole)
+            copiar.setIcon(E.icono("copiar"))
+        caja.addButton("Cerrar", QtWidgets.QMessageBox.AcceptRole)
+        caja.exec()
+        if causa == "reservado" and caja.clickedButton() is copiar:
+            QtWidgets.QApplication.clipboard().setText(RED.COMANDOS_RESERVA)
+            self.escribir("Comandos copiados. Pégalos en PowerShell abierto como administrador.")
 
     def _estado(self, eq):
         try:
@@ -419,8 +464,9 @@ class PestanaRegistro(QtWidgets.QWidget):
                 self.escribir(m)
             self.escribir(f"Registro iniciado: {self.registro.sesion} con {', '.join(e.nombre for e in eqs)}. "
                           "Recuerda la marca de sincronización (un salto, o 5 s de pie quieto en adultos mayores).")
-            self.btn.setText("■  Detener registro")
-            self.btn.setStyleSheet("background:#C0392B;color:white;")
+            self.btn.setText("  Detener registro")
+            self.btn.setIcon(E.icono("detener", "white"))
+            self.btn.setObjectName("detener"); self.btn.style().unpolish(self.btn); self.btn.style().polish(self.btn)
         else:
             reg = self.registro
             self.btn.setEnabled(False)
@@ -440,8 +486,9 @@ class PestanaRegistro(QtWidgets.QWidget):
         self.alertas_vistas.clear()
         self.lbl_alerta.hide()
         self.btn.setEnabled(True)
-        self.btn.setText("▶  Iniciar registro")
-        self.btn.setStyleSheet("")
+        self.btn.setText("  Iniciar registro")
+        self.btn.setIcon(E.icono("registro", "white"))
+        self.btn.setObjectName("principal"); self.btn.style().unpolish(self.btn); self.btn.style().polish(self.btn)
         if meta:
             for m in meta["mensajes"]:
                 self.escribir(m)
@@ -570,7 +617,7 @@ class PestanaProcesar(QtWidgets.QWidget):
         izq = QtWidgets.QVBoxLayout()
         g1 = QtWidgets.QGroupBox("1. Sesión")
         f1 = QtWidgets.QFormLayout(g1)
-        self.ed_carpeta = QtWidgets.QLineEdit(); b = QtWidgets.QPushButton("Elegir…"); b.clicked.connect(self.elegir_sesion)
+        self.ed_carpeta = QtWidgets.QLineEdit(); b = QtWidgets.QPushButton(E.icono("carpeta"), " Elegir…"); b.clicked.connect(self.elegir_sesion)
         h = QtWidgets.QHBoxLayout(); h.addWidget(self.ed_carpeta); h.addWidget(b)
         f1.addRow("Carpeta de la sesión:", h)
         self.cb_imu = QtWidgets.QComboBox(); f1.addRow("Archivo de la IMU:", self.cb_imu)
@@ -579,20 +626,20 @@ class PestanaProcesar(QtWidgets.QWidget):
 
         g2 = QtWidgets.QGroupBox("2. Video de la cámara")
         f2 = QtWidgets.QFormLayout(g2)
-        self.ed_video = QtWidgets.QLineEdit(); b2 = QtWidgets.QPushButton("Elegir…"); b2.clicked.connect(self.elegir_video)
+        self.ed_video = QtWidgets.QLineEdit(); b2 = QtWidgets.QPushButton(E.icono("carpeta"), " Elegir…"); b2.clicked.connect(self.elegir_video)
         h2 = QtWidgets.QHBoxLayout(); h2.addWidget(self.ed_video); h2.addWidget(b2)
         f2.addRow("Video:", h2)
         self.sp_fps = QtWidgets.QDoubleSpinBox(); self.sp_fps.setRange(1, 240); self.sp_fps.setDecimals(3)
         self.sp_fps.setToolTip("Cuadros por segundo reales. El valor del archivo puede no ser exacto.")
         f2.addRow("Cuadros por segundo:", self.sp_fps)
-        self.btn_mp = QtWidgets.QPushButton("Extraer puntos con MediaPipe"); self.btn_mp.clicked.connect(self.extraer)
+        self.btn_mp = QtWidgets.QPushButton(E.icono("procesar"), " Extraer puntos con MediaPipe"); self.btn_mp.clicked.connect(self.extraer)
         self.barra = QtWidgets.QProgressBar()
         f2.addRow(self.btn_mp); f2.addRow(self.barra)
         izq.addWidget(g2)
 
-        g3 = QtWidgets.QGroupBox("3. Sincronización por los saltos")
+        g3 = QtWidgets.QGroupBox("3. Sincronización (salto o inicio de la marcha)")
         f3 = QtWidgets.QFormLayout(g3)
-        self.btn_sync = QtWidgets.QPushButton("Detectar saltos"); self.btn_sync.clicked.connect(self.sincronizar)
+        self.btn_sync = QtWidgets.QPushButton(E.icono("onda"), " Detectar la marca de sincronización"); self.btn_sync.clicked.connect(self.sincronizar)
         f3.addRow(self.btn_sync)
         self.sp_desfase = QtWidgets.QDoubleSpinBox(); self.sp_desfase.setRange(-600, 600); self.sp_desfase.setDecimals(3)
         self.sp_desfase.setSingleStep(0.01); self.sp_desfase.setSuffix(" s")
@@ -608,7 +655,7 @@ class PestanaProcesar(QtWidgets.QWidget):
         for s in (self.sp_t0, self.sp_t1):
             s.setRange(0, 100000); s.setDecimals(2); s.setSuffix(" s (tiempo del video)")
         f4.addRow("Desde:", self.sp_t0); f4.addRow("Hasta:", self.sp_t1)
-        self.btn_calc = QtWidgets.QPushButton("Calcular y guardar"); self.btn_calc.clicked.connect(self.calcular)
+        self.btn_calc = QtWidgets.QPushButton(E.icono("concordancia"), " Calcular y guardar"); self.btn_calc.clicked.connect(self.calcular)
         f4.addRow(self.btn_calc)
         self.lbl_res = QtWidgets.QLabel(); self.lbl_res.setWordWrap(True)
         self.lbl_res.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
@@ -871,13 +918,13 @@ class PestanaConcordancia(QtWidgets.QWidget):
         super().__init__()
         self.reg = pestana_registro
         izq = QtWidgets.QVBoxLayout()
-        b = QtWidgets.QPushButton("Actualizar con resultados_etapa2.csv"); b.clicked.connect(self.actualizar)
+        b = QtWidgets.QPushButton(E.icono("actualizar"), " Actualizar con resultados_etapa2.csv"); b.clicked.connect(self.actualizar)
         izq.addWidget(b)
         self.chk_validas = QtWidgets.QCheckBox("Usar solo pasadas válidas"); self.chk_validas.setChecked(True)
         self.chk_validas.toggled.connect(self.actualizar)
         izq.addWidget(self.chk_validas)
         self.txt = QtWidgets.QTextBrowser(); izq.addWidget(self.txt, 1)
-        b2 = QtWidgets.QPushButton("Exportar gráfico y resumen"); b2.clicked.connect(self.exportar)
+        b2 = QtWidgets.QPushButton(E.icono("descargar"), " Exportar gráfico y resumen"); b2.clicked.connect(self.exportar)
         izq.addWidget(b2)
         self.g = pg.PlotWidget(title="Bland-Altman: cámara − IMU")
         self.g.setLabel("bottom", "promedio de cámara e IMU (Hz)"); self.g.setLabel("left", "diferencia (Hz)")
@@ -976,15 +1023,49 @@ class Ventana(QtWidgets.QMainWindow):
         self.resize(1300, 820)
         self.rx = Receptor(); self.rx.start()
         tabs = QtWidgets.QTabWidget()
+        tabs.setIconSize(QtCore.QSize(18, 18))
         self.p_reg = PestanaRegistro(self.rx)
-        tabs.addTab(self.p_reg, "1. Registro")
-        tabs.addTab(PestanaProcesar(self.p_reg), "2. Procesar sesión")
+        tabs.addTab(self.p_reg, E.icono("registro"), "Registro")
+        tabs.addTab(PestanaProcesar(self.p_reg), E.icono("procesar"), "Procesar sesión")
         self.p_conc = PestanaConcordancia(self.p_reg)
-        tabs.addTab(self.p_conc, "3. Concordancia")
-        ayuda = QtWidgets.QTextBrowser(); ayuda.setHtml(AYUDA)
-        tabs.addTab(ayuda, "Ayuda")
+        tabs.addTab(self.p_conc, E.icono("concordancia"), "Concordancia")
+        ayuda = QtWidgets.QTextBrowser(); ayuda.setHtml(AYUDA); ayuda.setOpenExternalLinks(True)
+        tabs.addTab(ayuda, E.icono("ayuda"), "Ayuda")
         tabs.currentChanged.connect(lambda i: self.p_conc.actualizar() if i == 2 else None)
-        self.setCentralWidget(tabs)
+        # encabezado con el estado general
+        cabecera = QtWidgets.QFrame()
+        hc = QtWidgets.QHBoxLayout(cabecera); hc.setContentsMargins(12, 8, 12, 4)
+        logo = QtWidgets.QLabel()
+        ico = E.ruta_recurso("icono.png")
+        if ico:
+            logo.setPixmap(QtGui.QPixmap(str(ico)).scaled(34, 34, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        titulo = QtWidgets.QLabel("<span style='font-size:17px;font-weight:700'>IMU Marcha</span><br>"
+                                  f"<span style='color:{E.color_suave()}'>Proyecto 1 · Etapa 2 · registro y validación</span>")
+        hc.addWidget(logo); hc.addWidget(titulo); hc.addStretch()
+        self.p_red, self.p_eqs, self.p_grab = E.Pildora(), E.Pildora(), E.Pildora()
+        for p in (self.p_red, self.p_eqs, self.p_grab):
+            hc.addWidget(p)
+        central = QtWidgets.QWidget(); vc = QtWidgets.QVBoxLayout(central); vc.setContentsMargins(0, 0, 0, 0)
+        vc.addWidget(cabecera); vc.addWidget(tabs, 1)
+        self.setCentralWidget(central)
+        t = QtCore.QTimer(self); t.timeout.connect(self.actualizar_cabecera); t.start(700)
+        self.actualizar_cabecera()
+
+    def actualizar_cabecera(self):
+        if self.rx.error:
+            self.p_red.fijar("Puerto 5005 bloqueado", "rojo")
+        else:
+            self.p_red.fijar("Recepción activa", "verde")
+        activos = [e for e in self.rx.lista() if e.activo()]
+        listos = [e for e in activos if e.listo()[0]]
+        if not activos:
+            self.p_eqs.fijar("Sin equipos", "gris")
+        else:
+            self.p_eqs.fijar(f"{len(listos)} de {len(activos)} equipo(s) listo(s)", "verde" if len(listos) == len(activos) else "ambar")
+        if self.p_reg.registro is not None:
+            self.p_grab.fijar(f"● Grabando {time.time() - self.p_reg.inicio:.0f} s", "rojo")
+        else:
+            self.p_grab.fijar("Sin grabar", "azul")
 
     def closeEvent(self, e):
         if self.p_reg.registro is not None:
@@ -1025,6 +1106,8 @@ def main():
         sys.exit(autoprueba())
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("IMU Marcha")
+    E.aplicar(app)
+    E.configurar_graficos()
     w = Ventana(); w.show()
     sys.exit(app.exec())
 

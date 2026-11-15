@@ -78,6 +78,7 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --windowed --name IMU_Marcha
           --collect-all mediapipe --add-data "pose_landmarker_full.task;."
+          --add-data "recursos/icono.png;." --icon recursos/icono.ico
           --exclude-module tkinter lanzar.py
       - name: Probar el ejecutable
         shell: pwsh
